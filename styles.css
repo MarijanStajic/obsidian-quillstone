@@ -1,0 +1,761 @@
+/*
+ * Les couleurs du papier suivent le thème de l'utilisateur : une feuille
+ * blanche éclatante au milieu d'un thème sombre est éblouissante la nuit.
+ */
+.theme-light {
+	--qs-paper: #ffffff;
+	--qs-rule: #c3d4ec;
+	--qs-desk: var(--background-secondary);
+}
+
+.theme-dark {
+	--qs-paper: #1e2128;
+	--qs-rule: #3a4560;
+	--qs-desk: var(--background-primary);
+}
+
+/*
+ * Valeurs toujours claires, indépendantes du thème actif : utilisées quand
+ * le réglage « Papier toujours clair » est activé (par défaut), pour que le
+ * surligneur reste fiable (multiply) sans dépendre de la détection de
+ * luminance ni délaver le texte en dessous.
+ */
+:root {
+	--qs-paper-light: #ffffff;
+	--qs-rule-light: #c3d4ec;
+}
+
+.quillstone-content {
+	padding: 0;
+	overflow: hidden; /* le panoramique/zoom gère lui-même son cadrage, pas le défilement du volet */
+	background-color: var(--qs-desk);
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+}
+
+/* Le volet visible : sa taille (pas celle de la page) dimensionne les deux
+   canvas. La page peut être plus grande, plus petite, ou partiellement hors
+   cadre selon le zoom/panoramique courant — voir Viewport dans view.ts. */
+.quillstone-wrapper {
+	position: relative;
+	flex: 1;
+	min-height: 0; /* laisse flex:1 vraiment se limiter à l'espace disponible */
+	overflow: hidden;
+	touch-action: none;
+}
+
+.quillstone-canvas {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	touch-action: none;
+}
+
+/* Calque du bas : recopie du cache des traits validés, cadrée à l'échelle et
+   au décalage courants. Seul celui-ci reçoit les événements pointeur. */
+.quillstone-canvas-committed {
+	cursor: default;
+}
+
+.quillstone-canvas-committed.is-pan-ready {
+	cursor: grab;
+}
+
+.quillstone-canvas-committed.is-panning {
+	cursor: grabbing;
+}
+
+/* Calque « en cours » (trait en direct / cercle de la gomme) : purement
+   visuel, ne doit jamais intercepter le pointeur. */
+.quillstone-canvas-active {
+	pointer-events: none;
+}
+
+/*
+ * Bouton rond « + » : un par page, toujours centré dans l'interstice sous
+ * elle (voir DrawView.addPageBtns/syncAddPageButtons), y compris sous la
+ * toute dernière — repositionné à chaque redessin du volet, jamais fixe dans
+ * le flux du document comme le reste de la barre d'outils.
+ */
+.quillstone-add-page-btn {
+	position: absolute;
+	transform: translate(-50%, -50%);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 36px;
+	height: 36px;
+	border-radius: 50%;
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+	cursor: pointer;
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+	z-index: 2;
+}
+
+.quillstone-add-page-btn:hover {
+	background-color: var(--interactive-accent-hover);
+}
+
+/* Cible de dépôt active pendant un glisser-déposer de page (voir dragSourcePageIndex, view.ts) : grossi et surligné pour montrer où la page glissée atterrirait. */
+.quillstone-add-page-btn.is-drop-target {
+	transform: translate(-50%, -50%) scale(1.35);
+	background-color: var(--interactive-accent-hover);
+	box-shadow: 0 0 0 3px var(--background-primary), 0 0 0 5px var(--interactive-accent);
+}
+
+/*
+ * Boutons discrets de suppression et de déplacement d'une page : un seul
+ * élément réutilisé par bouton, repositionnés sur la page actuellement
+ * survolée (voir hoveredPageIndex et updateHoverPageButtons), empilés l'un
+ * au-dessus de l'autre — masqués dès qu'il n'y a qu'une seule page (ni
+ * supprimable ni déplaçable) ou que rien n'est survolé.
+ */
+.quillstone-page-delete-btn,
+.quillstone-page-move-btn {
+	position: absolute;
+	transform: translate(-50%, -50%);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 26px;
+	height: 26px;
+	border-radius: 50%;
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	cursor: pointer;
+	z-index: 2;
+}
+
+.quillstone-page-delete-btn:hover {
+	color: var(--text-error);
+	border-color: var(--text-error);
+}
+
+.quillstone-page-move-btn {
+	cursor: grab;
+	/* Sans ça, un style global d'Obsidian/Electron qui désactive le glisser
+	   natif par défaut (courant, pour éviter qu'une image ne se glisse hors
+	   de l'app par accident) rendrait cette poignée non glissable malgré
+	   `draggable = true` posé en JS (voir view.ts). */
+	-webkit-user-drag: element;
+	user-select: none;
+}
+
+.quillstone-page-move-btn:hover {
+	color: var(--interactive-accent);
+	border-color: var(--interactive-accent);
+}
+
+.quillstone-page-move-btn:active {
+	cursor: grabbing;
+}
+
+/* Barre d'outils : collée en haut du volet, au-dessus du canvas, visible même
+   quand on fait défiler une page plus haute que la fenêtre. */
+.quillstone-toolbar {
+	position: sticky;
+	top: 0;
+	z-index: 5;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	padding: 6px 10px;
+	background-color: var(--background-primary);
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.quillstone-toolbar-group {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 0 8px;
+	border-right: 1px solid var(--background-modifier-border);
+}
+
+.quillstone-toolbar-group:last-child {
+	border-right: none;
+}
+
+.quillstone-toolbar .clickable-icon.is-active {
+	color: var(--interactive-accent);
+	background-color: var(--background-modifier-active-hover);
+}
+
+.quillstone-toolbar .clickable-icon.is-disabled {
+	opacity: 0.4;
+	pointer-events: none;
+}
+
+/*
+ * Une pastille pleine (palette, récents, sélecteur libre) : la bordure fine
+ * est ce qui la rend visible même quand sa couleur se rapproche de celle du
+ * fond de la barre (blanc en thème clair, noir en thème sombre, notamment) —
+ * sans elle, une telle pastille disparaîtrait presque entièrement.
+ */
+.quillstone-swatch {
+	width: 18px;
+	height: 18px;
+	box-sizing: border-box;
+	border-radius: 50%;
+	border: 1px solid var(--background-modifier-border);
+	cursor: pointer;
+	transition: box-shadow 0.1s ease, border-color 0.1s ease;
+}
+
+.quillstone-swatch:hover {
+	box-shadow: 0 0 0 2px var(--background-modifier-hover);
+}
+
+.quillstone-swatch:focus-visible {
+	outline: none;
+	box-shadow: 0 0 0 2px var(--interactive-accent);
+}
+
+.quillstone-swatch.is-active {
+	border-color: var(--interactive-accent);
+	border-width: 2px;
+}
+
+/* --- Palette de couleurs : deux rangées (principale + récents), sélecteur libre --- */
+
+/*
+ * Regroupe le bloc palette+récents et le sélecteur libre côte à côte, avec un
+ * espacement net entre les deux (voir .quillstone-color-picker-wrap) : ce
+ * ne sont pas des pastilles de plus dans la même rangée, mais deux zones
+ * distinctes — une palette à choisir, une action pour en définir une autre.
+ */
+.quillstone-colors-layout {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.quillstone-colors-column {
+	display: flex;
+	flex-direction: column;
+	/* Espacement cohérent entre rangée de base et rangée de récents — jamais
+	   collées l'une à l'autre. */
+	gap: 8px;
+}
+
+/*
+ * Grille, pas un flux : le nombre de colonnes (et leur largeur, celle d'une
+ * pastille de base) est posé en ligne par renderColorPicker (voir
+ * SWATCH_COL_PX dans view.ts), identique pour la rangée de base et celle des
+ * récents — sans ça, une rangée plus courte ou aux pastilles plus petites
+ * (voir .quillstone-swatch-recent) ne tombe pas sous les mêmes colonnes que
+ * l'autre, et l'ensemble a l'air désaligné plutôt que de former un bloc net.
+ */
+.quillstone-color-row {
+	display: grid;
+	justify-items: center;
+	align-items: center;
+	gap: 6px;
+}
+
+.quillstone-swatch-recent {
+	width: 14px;
+	height: 14px;
+}
+
+/*
+ * Sélecteur libre : séparé visuellement du bloc palette+récents par une
+ * bordure, pas seulement par le gap du conteneur (voir
+ * .quillstone-colors-layout) — sans ça il se lit comme une pastille de plus
+ * dans la même rangée plutôt que comme une action à part.
+ */
+.quillstone-color-picker-wrap {
+	display: flex;
+	align-items: center;
+	padding-left: 10px;
+	border-left: 1px solid var(--background-modifier-border);
+}
+
+/*
+ * Bouton qui ouvre le sélecteur maison (colorPicker.ts) : pas d'icône — son
+ * propre fond EST la couleur active de l'outil (voir view.ts), donc dimensionné
+ * comme les autres boutons de la barre (.quillstone-size), pas comme les
+ * petites pastilles de palette qu'il complète.
+ */
+.quillstone-swatch-picker {
+	width: 28px;
+	height: 28px;
+}
+
+/* --- Éditeur de palettes dans la page de réglages du plugin --- */
+
+.quillstone-settings-swatches {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 8px 0 16px;
+}
+
+.quillstone-settings-swatch {
+	width: 32px;
+	height: 32px;
+	border-radius: 6px;
+	cursor: pointer;
+	box-shadow: 0 0 0 1px var(--background-modifier-border);
+	transition: box-shadow 0.1s ease;
+}
+
+.quillstone-settings-swatch:hover {
+	box-shadow: 0 0 0 2px var(--interactive-accent);
+}
+
+/* La couleur n'a pas de sens pour la gomme : le groupe reste visible mais s'efface visuellement. */
+.quillstone-toolbar-group.is-irrelevant {
+	opacity: 0.35;
+	pointer-events: none;
+}
+
+/*
+ * Premier/arrière-plan et verrou n'ont de sens qu'avec une sélection : contrairement à
+ * .is-irrelevant, ce groupe disparaît entièrement plutôt que de s'estomper (voir
+ * updateSelectionActionsToolbar). Le même nom de classe sert aussi au seul bouton verrou
+ * à l'intérieur du groupe : masqué tant que la sélection ne contient aucune image, un
+ * trait ne pouvant pas être verrouillé.
+ */
+.quillstone-toolbar-group.is-hidden,
+.quillstone-toolbar .clickable-icon.is-hidden {
+	display: none;
+}
+
+.quillstone-size {
+	width: 28px;
+	height: 28px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	border-radius: 4px;
+	color: var(--text-muted);
+}
+
+.quillstone-size:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.quillstone-size.is-active {
+	color: var(--interactive-accent);
+	background-color: var(--background-modifier-active-hover);
+}
+
+.quillstone-size-dot {
+	border-radius: 50%;
+	background-color: currentColor;
+}
+
+.quillstone-zoom-reset {
+	padding: 4px 8px;
+	border-radius: 4px;
+	font-size: var(--font-ui-smaller, 0.8em);
+	color: var(--text-muted);
+	cursor: pointer;
+	user-select: none;
+}
+
+.quillstone-zoom-reset:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.quillstone-zoom-label {
+	min-width: 3.4em;
+	text-align: center;
+	font-size: var(--font-ui-smaller, 0.8em);
+	color: var(--text-muted);
+	user-select: none;
+}
+
+/* Pousse ce groupe tout à droite de la barre (voir buildToolbar, view.ts) — les autres groupes restent alignés à gauche, celui-ci seul se colle au bord opposé. */
+.quillstone-page-indicator-group {
+	margin-left: auto;
+	border-right: none;
+	padding-right: 0;
+}
+
+.quillstone-page-indicator {
+	padding: 4px 8px;
+	border-radius: 4px;
+	font-size: var(--font-ui-smaller, 0.8em);
+	color: var(--text-muted);
+	cursor: pointer;
+	user-select: none;
+	white-space: nowrap;
+}
+
+.quillstone-page-indicator:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+/* --- Aperçu intégré dans les notes (embed.ts / livePreview.ts) ------------ */
+
+.quillstone-embed-host {
+	display: block;
+}
+
+.quillstone-embed {
+	display: block;
+	position: relative; /* ancre le bouton de dépliage en coin, voir .quillstone-embed-toggle */
+	/*
+	 * Marges verticales propres, comme un paragraphe ou une image intégrée :
+	 * sans elles, l'intégration se retrouve collée au texte qui l'entoure
+	 * (le symptôme observé était du texte compressé contre son bord
+	 * supérieur) — Obsidian ne fournit cette marge que pour les extensions
+	 * qu'il reconnaît lui-même, jamais pour .draw.
+	 */
+	margin: 1em 0;
+	line-height: 0; /* évite l'espace parasite sous le canvas, comme pour une image */
+}
+
+/*
+ * Fenêtre de rognage vertical : la largeur suit le corps de la note (comme
+ * du texte), seule la hauteur visible varie par palier (voir stepHeightPx,
+ * preview.ts) — le cadre (ombre, coins arrondis) vit ici, pas sur le canvas,
+ * pour ne jamais paraître tronqué au bord du rognage.
+ */
+.quillstone-embed-crop {
+	display: block;
+	overflow: hidden;
+	border-radius: 3px;
+	box-shadow: 0 1px 6px rgba(0, 0, 0, 0.15);
+	/* Anime le dépliage/repliage (voir buildEmbedDom, preview.ts). */
+	transition: max-height 0.25s ease;
+}
+
+.quillstone-embed-canvas {
+	display: block;
+	width: 100%;
+	max-width: 100%;
+	height: auto;
+}
+
+.quillstone-embed-clickable {
+	cursor: pointer;
+}
+
+.quillstone-embed-clickable:hover .quillstone-embed-crop,
+.quillstone-embed-clickable:focus-visible .quillstone-embed-crop {
+	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: 2px;
+}
+
+/*
+ * Bouton de dépliage : coin bas-droit plutôt que haut-droit — dans le style
+ * d'un « voir plus » qui invite à continuer vers le bas, cohérent avec un
+ * dépliage vertical (voir la fonctionnalité). Discret par défaut, plus
+ * visible au survol de l'aperçu ou du bouton lui-même. stopPropagation() côté
+ * JS (preview.ts) l'empêche de déclencher l'ouverture de la feuille comme un
+ * clic sur le corps de l'aperçu.
+ */
+.quillstone-embed-toggle {
+	position: absolute;
+	right: 6px;
+	bottom: 6px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background-color: var(--background-primary);
+	color: var(--text-muted);
+	opacity: 0.55;
+	cursor: pointer;
+	transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.quillstone-embed-toggle:hover,
+.quillstone-embed-toggle:focus-visible {
+	opacity: 1;
+	color: var(--text-normal);
+}
+
+.quillstone-embed:hover .quillstone-embed-toggle {
+	opacity: 0.85;
+}
+
+/*
+ * Pagination de l'aperçu (feuilleter un document à pages multiples) : coin
+ * bas-gauche, symétrique du bouton de dépliage (bas-droit) — même discrétion
+ * par défaut, plus visible au survol de l'aperçu ou du groupe lui-même. Voir
+ * buildPager, preview.ts.
+ */
+.quillstone-embed-pager {
+	position: absolute;
+	left: 6px;
+	bottom: 6px;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 4px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background-color: var(--background-primary);
+	opacity: 0.55;
+	transition: opacity 0.15s ease;
+}
+
+.quillstone-embed:hover .quillstone-embed-pager {
+	opacity: 0.85;
+}
+
+.quillstone-embed-pager:hover,
+.quillstone-embed-pager:focus-within {
+	opacity: 1;
+}
+
+.quillstone-embed-page-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border: none;
+	background: none;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.quillstone-embed-page-btn:hover,
+.quillstone-embed-page-btn:focus-visible {
+	color: var(--text-normal);
+}
+
+.quillstone-embed-page-btn:disabled {
+	opacity: 0.35;
+	cursor: default;
+	pointer-events: none;
+}
+
+.quillstone-embed-page-label {
+	font-size: 11px;
+	color: var(--text-muted);
+	white-space: nowrap;
+	user-select: none;
+}
+
+.quillstone-embed-missing,
+.quillstone-embed-error {
+	display: block;
+	padding: 10px 14px;
+	border: 1px dashed var(--background-modifier-border);
+	border-radius: 4px;
+	color: var(--text-muted);
+	background-color: var(--background-secondary);
+	font-size: var(--font-ui-small, 0.85em);
+	line-height: 1.4;
+}
+
+/* --- Sélecteur de couleur maison (colorPicker.ts) ------------------------- */
+/* Remplace <input type="color"> : dans Electron, sa boîte de dialogue
+   système valide dès le premier clic, ce qui empêche d'explorer les teintes.
+   Ce panneau, lui, reste ouvert jusqu'à Valider/Annuler/Échap/clic extérieur. */
+
+.quillstone-picker-panel {
+	position: fixed;
+	z-index: var(--layer-menu, 70);
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 12px;
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	box-shadow: var(--shadow-l, 0 4px 18px rgba(0, 0, 0, 0.25));
+}
+
+.quillstone-picker-area {
+	display: flex;
+	gap: 8px;
+}
+
+.quillstone-picker-square-wrap,
+.quillstone-picker-hue-wrap {
+	position: relative;
+	cursor: crosshair;
+	border-radius: 4px;
+	overflow: hidden;
+	box-shadow: 0 0 0 1px var(--background-modifier-border);
+}
+
+.quillstone-picker-square-wrap:focus-visible,
+.quillstone-picker-hue-wrap:focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: 1px;
+}
+
+.quillstone-picker-square,
+.quillstone-picker-hue {
+	display: block;
+}
+
+/* Repère de sélection dans le carré : anneau blanc cerclé de noir, visible sur n'importe quelle couleur sous-jacente. */
+.quillstone-picker-square-cursor {
+	position: absolute;
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	border: 2px solid #fff;
+	box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+	transform: translate(-50%, -50%);
+	pointer-events: none;
+}
+
+/* Repère de sélection sur la bande de teinte : même traitement, en barre horizontale. */
+.quillstone-picker-hue-cursor {
+	position: absolute;
+	left: -2px;
+	right: -2px;
+	height: 4px;
+	border: 2px solid #fff;
+	box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+	border-radius: 2px;
+	transform: translateY(-50%);
+	pointer-events: none;
+}
+
+.quillstone-picker-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.quillstone-picker-hex {
+	flex: 1;
+	min-width: 0;
+	height: 26px;
+	padding: 0 8px;
+	font-size: var(--font-ui-small, 0.85em);
+	font-family: var(--font-monospace, monospace);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background-color: var(--background-secondary);
+	color: var(--text-normal);
+}
+
+.quillstone-picker-hex:focus {
+	border-color: var(--interactive-accent);
+	outline: none;
+}
+
+/* Aperçu couleur choisie / couleur précédente, côte à côte pour comparer directement. */
+.quillstone-picker-preview {
+	display: flex;
+	flex-shrink: 0;
+	border-radius: 4px;
+	overflow: hidden;
+	box-shadow: 0 0 0 1px var(--background-modifier-border);
+}
+
+.quillstone-picker-preview-current,
+.quillstone-picker-preview-previous {
+	width: 20px;
+	height: 26px;
+}
+
+.quillstone-picker-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 6px;
+}
+
+/* Modale de rognage (voir cropModal.ts) : l'aperçu (canvas) et le rectangle
+   de rognage superposé, tous deux dans un cadre de taille fixe (voir
+   MAX_PREVIEW_SIZE) centré dans la modale. */
+.quillstone-crop-stage {
+	position: relative;
+	margin: 0 auto 12px auto;
+	overflow: hidden;
+	background: var(--background-secondary);
+}
+
+.quillstone-crop-stage canvas {
+	display: block;
+}
+
+/* Le glissement se fait au pointeur, jamais au clavier/à la souris pour sélectionner du texte en dessous : touch-action:none évite en plus qu'un geste tactile ne fasse défiler la page derrière la modale. */
+.quillstone-crop-rect {
+	position: absolute;
+	border: 2px solid var(--interactive-accent);
+	box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+	cursor: move;
+	touch-action: none;
+}
+
+.quillstone-crop-handle {
+	position: absolute;
+	width: 12px;
+	height: 12px;
+	background-color: var(--interactive-accent);
+	border: 1px solid var(--background-primary);
+	border-radius: 2px;
+	touch-action: none;
+}
+
+.quillstone-crop-handle-nw {
+	left: 0;
+	top: 0;
+	transform: translate(-50%, -50%);
+	cursor: nwse-resize;
+}
+
+.quillstone-crop-handle-ne {
+	right: 0;
+	top: 0;
+	transform: translate(50%, -50%);
+	cursor: nesw-resize;
+}
+
+.quillstone-crop-handle-se {
+	right: 0;
+	bottom: 0;
+	transform: translate(50%, 50%);
+	cursor: nwse-resize;
+}
+
+.quillstone-crop-handle-sw {
+	left: 0;
+	bottom: 0;
+	transform: translate(-50%, 50%);
+	cursor: nesw-resize;
+}
+
+/* Sélecteur de dossier (voir folderChoiceModal.ts) : champ de recherche + liste filtrée, cliquable ligne par ligne. */
+.quillstone-folder-search {
+	width: 100%;
+	margin-bottom: 0.5em;
+}
+
+.quillstone-folder-list {
+	max-height: 280px;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+}
+
+.quillstone-folder-item {
+	padding: 6px 10px;
+	cursor: pointer;
+}
+
+.quillstone-folder-item:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.quillstone-folder-empty {
+	padding: 6px 10px;
+	color: var(--text-muted);
+}
