@@ -310,7 +310,9 @@ export function serialize(drawing: Drawing): string {
 		}
 	}
 
-	const pdfSources = Object.fromEntries(Object.entries(drawing.pdfSources).filter(([id]) => referenced.has(id)));
+	const pdfSources: Record<string, string> = Object.fromEntries(
+		Object.entries(drawing.pdfSources).filter(([id]) => referenced.has(id))
+	);
 	const toWrite: Drawing =
 		Object.keys(pdfSources).length > 0 ? { ...drawing, pdfSources } : { version: drawing.version, pages: drawing.pages };
 
@@ -331,7 +333,7 @@ function sanitizePage(data: Partial<DrawingPage> & { strokes?: Stroke[] }): Draw
 	const defaultHeight = orientation === "landscape" ? PAGE_WIDTH : PAGE_HEIGHT;
 
 	const elements: DrawElement[] = Array.isArray(data.elements)
-		? (data.elements as DrawElement[])
+		? data.elements
 		: Array.isArray(data.strokes)
 			? data.strokes.map((stroke) => ({ ...stroke, type: "stroke" as const }))
 			: [];
@@ -367,7 +369,7 @@ function sanitizePdfSources(data: unknown): Record<string, string> | undefined {
 		string,
 		string,
 	][];
-	return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+	return entries.length > 0 ? (Object.fromEntries(entries) as Record<string, string>) : undefined;
 }
 
 export function parse(raw: string): Drawing {

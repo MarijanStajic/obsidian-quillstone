@@ -1,8 +1,8 @@
 {
   "id": "quillstone",
   "name": "QuillStone",
-  "version": "1.0.0",
-  "minAppVersion": "1.4.0",
+  "version": "1.0.1",
+  "minAppVersion": "1.5.7",
   "description": "Handwritten sheets: draw with a stylus or mouse, with a live preview in your notes.",
   "author": "Marijan Stajic",
   "authorUrl": "https://stajic.me",

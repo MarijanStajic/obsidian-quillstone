@@ -11,7 +11,7 @@ export function pickFile(accept: string): Promise<File | null> {
 		const input = document.createElement("input");
 		input.type = "file";
 		input.accept = accept;
-		input.style.display = "none";
+		input.setCssStyles({ display: "none" });
 		const cleanup = (file: File | null) => {
 			input.remove();
 			resolve(file);

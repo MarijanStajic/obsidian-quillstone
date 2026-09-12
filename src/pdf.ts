@@ -1,5 +1,6 @@
 import * as pdfjsLib from "pdfjs-dist";
 import type { PDFDocumentProxy } from "pdfjs-dist";
+import pdfWorkerSource from "virtual:pdf-worker-source";
 
 /**
  * Lecture et rendu de PDF, pour la fonctionnalité « importer un PDF ». Comme
@@ -29,10 +30,20 @@ const RASTER_DPI = 200;
 
 let workerConfigured = false;
 
-/** À appeler une fois avant tout getDocument() — voir esbuild.config.mjs pour la provenance de pdf.worker.js, bundlé séparément de main.js. */
-export function configurePdfWorker(workerSrc: string): void {
+/**
+ * À appeler une fois avant tout getDocument(). Le code du Worker pdf.js est
+ * embarqué dans main.js sous forme de chaîne (voir esbuild.config.mjs,
+ * virtual:pdf-worker-source) plutôt que livré comme fichier séparé : Obsidian
+ * ne télécharge que main.js/manifest.json/styles.css depuis une release,
+ * donc un pdf.worker.js à part ne serait jamais présent chez un utilisateur
+ * ayant installé le plugin normalement. On le matérialise ici en Blob URL,
+ * jamais révoquée : le Worker doit rester joignable pour toute la durée de
+ * vie du plugin.
+ */
+export function configurePdfWorker(): void {
 	if (workerConfigured) return;
-	pdfjsLib.GlobalWorkerOptions.workerSrc = workerSrc;
+	const blob = new Blob([pdfWorkerSource], { type: "text/javascript" });
+	pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(blob);
 	workerConfigured = true;
 }
 
@@ -61,7 +72,7 @@ export async function renderPdfPageToCanvas(doc: PDFDocumentProxy, pageNumber: n
 	canvas.width = Math.max(1, Math.round(viewport.width));
 	canvas.height = Math.max(1, Math.round(viewport.height));
 	const ctx = canvas.getContext("2d");
-	if (!ctx) throw new Error("Canvas 2D indisponible");
+	if (!ctx) throw new Error("Canvas 2D unavailable");
 
 	await page.render({ canvasContext: ctx, viewport }).promise;
 	return canvas;

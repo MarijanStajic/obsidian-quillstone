@@ -23,3 +23,8 @@ declare module "electron" {
 		readImage(): NativeImage;
 	};
 }
+
+/** Le CommonJS `require` qu'Electron injecte dans `window` sur desktop (absent sur mobile) — voir view.ts:getElectron, chargé via `window.require` plutôt qu'un `require()` global pour rester valide selon les règles de lint d'Obsidian (require() est autrement interdit en import statique). */
+interface Window {
+	require?(id: "electron"): typeof import("electron");
+}

@@ -6,8 +6,6 @@ import { intrinsicSize } from "./render";
 const MAX_PREVIEW_SIZE = 480;
 /** Taille minimale (CSS px) du rectangle de rognage — sous ce seuil, les poignées se chevaucheraient et le résultat serait de toute façon inutilisable. */
 const MIN_RECT_SIZE = 24;
-/** Épaisseur (CSS px) de la zone cliquable d'une poignée, carrée, centrée sur le coin qu'elle contrôle. */
-const HANDLE_SIZE = 12;
 
 type Corner = "nw" | "ne" | "se" | "sw";
 interface Rect {
@@ -59,14 +57,12 @@ export class CropImageModal extends Modal {
 		this.stageHeight = Math.max(1, Math.round(naturalHeight * scale));
 
 		this.stageEl = contentEl.createDiv({ cls: "quillstone-crop-stage" });
-		this.stageEl.style.width = `${this.stageWidth}px`;
-		this.stageEl.style.height = `${this.stageHeight}px`;
+		this.stageEl.setCssStyles({ width: `${this.stageWidth}px`, height: `${this.stageHeight}px` });
 
 		const canvas = this.stageEl.createEl("canvas");
 		canvas.width = this.stageWidth;
 		canvas.height = this.stageHeight;
-		canvas.style.width = `${this.stageWidth}px`;
-		canvas.style.height = `${this.stageHeight}px`;
+		canvas.setCssStyles({ width: `${this.stageWidth}px`, height: `${this.stageHeight}px` });
 		const ctx = canvas.getContext("2d");
 		ctx?.drawImage(this.image, 0, 0, this.stageWidth, this.stageHeight);
 
@@ -110,10 +106,7 @@ export class CropImageModal extends Modal {
 		const y = clampNum(next.y, 0, this.stageHeight - height);
 		this.rect = { x, y, width, height };
 
-		this.rectEl.style.left = `${x}px`;
-		this.rectEl.style.top = `${y}px`;
-		this.rectEl.style.width = `${width}px`;
-		this.rectEl.style.height = `${height}px`;
+		this.rectEl.setCssStyles({ left: `${x}px`, top: `${y}px`, width: `${width}px`, height: `${height}px` });
 	}
 
 	/**

@@ -175,7 +175,7 @@ export default class QuillStonePlugin extends Plugin {
 	}
 
 	private scanForDrawEmbeds(node: Node): void {
-		if (!(node instanceof HTMLElement)) return;
+		if (!node.instanceOf(HTMLElement)) return;
 
 		const descendants = Array.from(node.querySelectorAll<HTMLElement>(".internal-embed"));
 		const candidates = node.matches(".internal-embed") ? [node, ...descendants] : descendants;
@@ -312,16 +312,14 @@ export default class QuillStonePlugin extends Plugin {
 	}
 
 	/**
-	 * Pointe pdf.js vers son Worker (voir esbuild.config.mjs, qui le bundle à
-	 * part en pdf.worker.js, jamais dans main.js) — une seule fois, idempotent
-	 * (voir pdf.ts:configurePdfWorker). Partagé par l'import PDF en nouvelle
-	 * feuille (ci-dessous) ET par le bouton d'import de la barre d'outils
-	 * d'une feuille déjà ouverte (voir view.ts:importPdfIntoDocument).
+	 * Pointe pdf.js vers son Worker (embarqué dans main.js, voir
+	 * pdf.ts:configurePdfWorker) — une seule fois, idempotent. Partagé par
+	 * l'import PDF en nouvelle feuille (ci-dessous) ET par le bouton d'import
+	 * de la barre d'outils d'une feuille déjà ouverte (voir
+	 * view.ts:importPdfIntoDocument).
 	 */
 	ensurePdfWorkerConfigured(): void {
-		if (!this.manifest.dir) throw new Error("Plugin folder not found.");
-		const workerPath = normalizePath(`${this.manifest.dir}/pdf.worker.js`);
-		configurePdfWorker(this.app.vault.adapter.getResourcePath(workerPath));
+		configurePdfWorker();
 	}
 
 	/**

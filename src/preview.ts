@@ -128,9 +128,6 @@ export class DrawPreviewManager {
 		hostEl.removeClass("quillstone-embed-error");
 
 		if (!file || !file.path) {
-			// TEMP : diagnostic — confirme que le rendu s'arrête bien ici plutôt
-			// que de laisser passer un TFile ou un chemin vide plus loin.
-			console.warn(`[quillstone] Aperçu introuvable pour le lien "${linktext}" (file =`, file, ").");
 			hostEl.addClass("quillstone-embed-missing");
 			hostEl.setText(
 				`Sheet not found: "${linktext}". Check the link's path, or whether the file has been moved or renamed.`
@@ -248,7 +245,7 @@ export class DrawPreviewManager {
 
 	/** Largeur d'affichage CSS du canvas : fluide (comme du texte) sauf largeur explicite ![[x|400]] — jamais affectée par le dépliage, qui ne joue que sur la hauteur visible (voir buildEmbedDom). */
 	private applyCanvasWidth(canvas: HTMLCanvasElement, requestedWidth: number | null): void {
-		canvas.style.width = requestedWidth ? `${requestedWidth}px` : "100%";
+		canvas.setCssStyles({ width: requestedWidth ? `${requestedWidth}px` : "100%" });
 	}
 
 	/**
@@ -311,7 +308,7 @@ export class DrawPreviewManager {
 		canvas.addClass("quillstone-embed-canvas");
 		this.applyCanvasWidth(canvas, requestedWidth);
 		cropEl.appendChild(canvas);
-		cropEl.style.maxHeight = `${this.stepHeightPx(step, cropEl, canvas)}px`;
+		cropEl.setCssStyles({ maxHeight: `${this.stepHeightPx(step, cropEl, canvas)}px` });
 
 		const toggleBtn = hostEl.createEl("button", { cls: "quillstone-embed-toggle", attr: { type: "button" } });
 		this.syncToggleButton(toggleBtn, step);
@@ -321,7 +318,7 @@ export class DrawPreviewManager {
 		// n'y a rien à déplier : le bouton ne ferait rien de visible, autant le
 		// masquer plutôt que d'inviter à un clic sans effet.
 		if (this.naturalHeightPx(cropEl, canvas) <= COLLAPSED_HEIGHT_PX) {
-			cropEl.style.maxHeight = "none";
+			cropEl.setCssStyles({ maxHeight: "none" });
 			toggleBtn.hide();
 		}
 
@@ -333,7 +330,7 @@ export class DrawPreviewManager {
 
 			step = step >= STEP_COUNT - 1 ? 0 : ((step + 1) as ExpandStep);
 			this.expandStep.set(hostEl, step);
-			cropEl.style.maxHeight = `${this.stepHeightPx(step, cropEl, canvas)}px`;
+			cropEl.setCssStyles({ maxHeight: `${this.stepHeightPx(step, cropEl, canvas)}px` });
 			this.syncToggleButton(toggleBtn, step);
 		});
 

@@ -362,7 +362,6 @@ export class QuillStoneSettingTab extends PluginSettingTab {
 				slider
 					.setLimits(300, 1500, 50)
 					.setValue(this.plugin.settings.straightenHoldDelayMs)
-					.setDynamicTooltip()
 					.onChange(async (value) => {
 						this.plugin.settings.straightenHoldDelayMs = value;
 						await this.plugin.saveSettings();
@@ -414,18 +413,20 @@ export class QuillStoneSettingTab extends PluginSettingTab {
 		const palette = this.plugin.settings.colors[tool].palette;
 		palette.forEach((color, index) => {
 			const swatch = container.createDiv({ cls: "quillstone-settings-swatch" });
-			swatch.style.backgroundColor = color;
+			swatch.setCssStyles({ backgroundColor: color });
 			swatch.setAttribute("aria-label", `${color} — click to edit`);
 			swatch.addEventListener("click", () => {
 				openColorPicker({
 					anchor: swatch,
 					initialColor: color,
-					onCommit: async (newColor) => {
-						this.plugin.settings.colors[tool].palette[index] = newColor;
-						await this.plugin.saveSettings();
-						this.plugin.refreshOpenDrawViews();
-						swatch.style.backgroundColor = newColor;
-						swatch.setAttribute("aria-label", `${newColor} — click to edit`);
+					onCommit: (newColor) => {
+						void (async () => {
+							this.plugin.settings.colors[tool].palette[index] = newColor;
+							await this.plugin.saveSettings();
+							this.plugin.refreshOpenDrawViews();
+							swatch.setCssStyles({ backgroundColor: newColor });
+							swatch.setAttribute("aria-label", `${newColor} — click to edit`);
+						})();
 					},
 				});
 			});

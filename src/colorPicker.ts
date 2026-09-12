@@ -111,10 +111,9 @@ function setupHiDPICanvas(canvas: HTMLCanvasElement, cssW: number, cssH: number)
 	const dpr = window.devicePixelRatio || 1;
 	canvas.width = Math.round(cssW * dpr);
 	canvas.height = Math.round(cssH * dpr);
-	canvas.style.width = `${cssW}px`;
-	canvas.style.height = `${cssH}px`;
+	canvas.setCssStyles({ width: `${cssW}px`, height: `${cssH}px` });
 	const ctx = canvas.getContext("2d", { willReadFrequently: true });
-	if (!ctx) throw new Error("Canvas 2D indisponible");
+	if (!ctx) throw new Error("Canvas 2D unavailable");
 	ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 	return ctx;
 }
@@ -179,7 +178,7 @@ export function openColorPicker(options: ColorPickerOptions): void {
 	previewCurrent.setAttribute("aria-label", "Selected color");
 	const previewPrevious = preview.createDiv({ cls: "quillstone-picker-preview-previous" });
 	previewPrevious.setAttribute("aria-label", "Previous color");
-	previewPrevious.style.backgroundColor = initial;
+	previewPrevious.setCssStyles({ backgroundColor: initial });
 
 	const actions = panel.createDiv({ cls: "quillstone-picker-actions" });
 	const cancelBtn = actions.createEl("button", { cls: "quillstone-picker-cancel", text: "Cancel" });
@@ -191,15 +190,14 @@ export function openColorPicker(options: ColorPickerOptions): void {
 	paintHueStrip(hueCtx, HUE_WIDTH, HUE_HEIGHT);
 
 	function updateCursors(): void {
-		squareCursor.style.left = `${squareX}px`;
-		squareCursor.style.top = `${squareY}px`;
-		hueCursor.style.top = `${(hue / 360) * HUE_HEIGHT}px`;
+		squareCursor.setCssStyles({ left: `${squareX}px`, top: `${squareY}px` });
+		hueCursor.setCssStyles({ top: `${(hue / 360) * HUE_HEIGHT}px` });
 	}
 
 	function applyWorkingColor(color: string, live: boolean): void {
 		workingColor = color;
 		hexInput.value = color;
-		previewCurrent.style.backgroundColor = color;
+		previewCurrent.setCssStyles({ backgroundColor: color });
 		updateCursors();
 		if (live) onPreview?.(color);
 	}
@@ -279,7 +277,7 @@ export function openColorPicker(options: ColorPickerOptions): void {
 		squareY = (1 - hsv.v) * SQUARE_SIZE;
 		paintSquare(squareCtx, SQUARE_SIZE, SQUARE_SIZE, hue);
 		workingColor = normalized;
-		previewCurrent.style.backgroundColor = normalized;
+		previewCurrent.setCssStyles({ backgroundColor: normalized });
 		updateCursors();
 		onPreview?.(normalized);
 		// hexInput.value n'est pas réécrit ici : ça déplacerait le curseur de saisie en pleine frappe.
@@ -348,6 +346,5 @@ function positionPanel(panel: HTMLElement, anchor: HTMLElement): void {
 	}
 	if (top < margin) top = margin;
 
-	panel.style.left = `${left}px`;
-	panel.style.top = `${top}px`;
+	panel.setCssStyles({ left: `${left}px`, top: `${top}px` });
 }

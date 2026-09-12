@@ -85,10 +85,8 @@ import {
 	boundsIntersect,
 	boundsOfPoints,
 	imageIntersectsMarquee,
-	marqueeContainsPoint,
 	pointInRect,
 	rotatePointAround,
-	rotatedRectCorners,
 	strokeSelectionRatio,
 } from "./selection";
 
@@ -313,7 +311,7 @@ let electronModule: typeof import("electron") | null | undefined;
 function getElectron(): typeof import("electron") | null {
 	if (electronModule === undefined) {
 		try {
-			electronModule = require("electron");
+			electronModule = window.require?.("electron") ?? null;
 		} catch {
 			electronModule = null;
 		}
@@ -735,7 +733,7 @@ export class DrawView extends TextFileView {
 	/** Reconstruit tout l'état de rendu depuis `doc.pages` — à chaque chargement (voir setViewData/clear), jamais lors d'un simple ajout/suppression de page (voir insertPageAt/deletePage, qui maintiennent `pages` incrémentalement). */
 	private rebuildPageRuntimes(): void {
 		for (const rt of this.pages) {
-			if (rt.committedRedrawHandle !== null) cancelAnimationFrame(rt.committedRedrawHandle);
+			if (rt.committedRedrawHandle !== null) window.cancelAnimationFrame(rt.committedRedrawHandle);
 		}
 		this.pages = this.doc.pages.map((page) => this.createPageRuntime(page));
 		this.layoutPages();
@@ -983,7 +981,7 @@ export class DrawView extends TextFileView {
 		if (pageIndex < 0 || pageIndex >= this.pages.length || this.pages.length <= 1) return;
 
 		const rt = this.pages[pageIndex];
-		if (rt.committedRedrawHandle !== null) cancelAnimationFrame(rt.committedRedrawHandle);
+		if (rt.committedRedrawHandle !== null) window.cancelAnimationFrame(rt.committedRedrawHandle);
 
 		this.doc.pages.splice(pageIndex, 1);
 		this.pages.splice(pageIndex, 1);
@@ -1270,11 +1268,11 @@ export class DrawView extends TextFileView {
 		this.resizeObserver?.disconnect();
 		if (this.cacheRegenTimeout !== null) window.clearTimeout(this.cacheRegenTimeout);
 		for (const rt of this.pages) {
-			if (rt.committedRedrawHandle !== null) cancelAnimationFrame(rt.committedRedrawHandle);
+			if (rt.committedRedrawHandle !== null) window.cancelAnimationFrame(rt.committedRedrawHandle);
 		}
 		this.resetStraightLineState();
 		this.clearLongPressMenu();
-		if (this.laserAnimHandle !== null) cancelAnimationFrame(this.laserAnimHandle);
+		if (this.laserAnimHandle !== null) window.cancelAnimationFrame(this.laserAnimHandle);
 		this.imageCache?.clear();
 		this.committedCanvas?.removeEventListener("pointerdown", this.onPointerDown);
 		this.committedCanvas?.removeEventListener("pointermove", this.onPointerMove);
@@ -1551,7 +1549,7 @@ export class DrawView extends TextFileView {
 	private scheduleCommittedRedraw(pageIndex: number): void {
 		const rt = this.pages[pageIndex];
 		if (!rt || rt.committedRedrawHandle !== null) return;
-		rt.committedRedrawHandle = requestAnimationFrame(() => {
+		rt.committedRedrawHandle = window.requestAnimationFrame(() => {
 			rt.committedRedrawHandle = null;
 			this.flushCommittedRedraw(pageIndex);
 		});
@@ -1562,7 +1560,7 @@ export class DrawView extends TextFileView {
 		const rt = this.pages[pageIndex];
 		if (!rt) return;
 		if (rt.committedRedrawHandle !== null) {
-			cancelAnimationFrame(rt.committedRedrawHandle);
+			window.cancelAnimationFrame(rt.committedRedrawHandle);
 			rt.committedRedrawHandle = null;
 		}
 		rt.dirtyBounds = null;
@@ -1603,7 +1601,7 @@ export class DrawView extends TextFileView {
 	private scheduleViewportRedraw(): void {
 		if (this.viewportRedrawScheduled) return;
 		this.viewportRedrawScheduled = true;
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			this.viewportRedrawScheduled = false;
 			this.redrawViewport();
 		});
@@ -1617,8 +1615,7 @@ export class DrawView extends TextFileView {
 			const cx = rt.originX + rt.page.width / 2;
 			const cy = rt.originY + rt.page.height + PAGE_GAP / 2;
 			const [sx, sy] = this.documentToScreen(cx, cy);
-			this.addPageBtns[i].style.left = `${sx}px`;
-			this.addPageBtns[i].style.top = `${sy}px`;
+			this.addPageBtns[i].setCssStyles({ left: `${sx}px`, top: `${sy}px` });
 		}
 	}
 
@@ -1644,13 +1641,11 @@ export class DrawView extends TextFileView {
 		const centerY = rt.originY + rt.page.height / 2;
 
 		const [dsx, dsy] = this.documentToScreen(x, centerY);
-		this.pageDeleteBtn.style.left = `${dsx}px`;
-		this.pageDeleteBtn.style.top = `${dsy}px`;
+		this.pageDeleteBtn.setCssStyles({ left: `${dsx}px`, top: `${dsy}px` });
 		this.pageDeleteBtn.show();
 
 		const [msx, msy] = this.documentToScreen(x, centerY - PAGE_MOVE_BTN_GAP);
-		this.pageMoveBtn.style.left = `${msx}px`;
-		this.pageMoveBtn.style.top = `${msy}px`;
+		this.pageMoveBtn.setCssStyles({ left: `${msx}px`, top: `${msy}px` });
 		this.pageMoveBtn.show();
 	}
 
@@ -1665,7 +1660,7 @@ export class DrawView extends TextFileView {
 	private scheduleActiveRedraw(): void {
 		if (this.activeRedrawScheduled) return;
 		this.activeRedrawScheduled = true;
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			this.activeRedrawScheduled = false;
 			this.redrawActiveCanvas();
 		});
@@ -1864,9 +1859,9 @@ export class DrawView extends TextFileView {
 				this.laserAnimHandle = null;
 				return;
 			}
-			this.laserAnimHandle = requestAnimationFrame(tick);
+			this.laserAnimHandle = window.requestAnimationFrame(tick);
 		};
-		this.laserAnimHandle = requestAnimationFrame(tick);
+		this.laserAnimHandle = window.requestAnimationFrame(tick);
 	}
 
 	/**
@@ -2324,7 +2319,7 @@ export class DrawView extends TextFileView {
 
 	private onWindowKeyDown = (event: KeyboardEvent): void => {
 		if (event.code !== "Space" || event.repeat) return;
-		if (this.app.workspace.activeLeaf !== this.leaf) return;
+		if (this.app.workspace.getActiveViewOfType(DrawView) !== this) return;
 		event.preventDefault();
 		this.spacePressed = true;
 		this.updateCursor();
@@ -2559,11 +2554,13 @@ export class DrawView extends TextFileView {
 	/** Ancre invisible positionnée au point de clic : openColorPicker a besoin d'un HTMLElement à ancrer, qu'un clic de menu contextuel ne fournit pas naturellement. */
 	private openSelectionColorPicker(x: number, y: number): void {
 		const anchor = document.createElement("div");
-		anchor.style.position = "fixed";
-		anchor.style.left = `${x}px`;
-		anchor.style.top = `${y}px`;
-		anchor.style.width = "0";
-		anchor.style.height = "0";
+		anchor.setCssStyles({
+			position: "fixed",
+			left: `${x}px`,
+			top: `${y}px`,
+			width: "0",
+			height: "0",
+		});
 		document.body.appendChild(anchor);
 
 		openColorPicker({
@@ -2708,8 +2705,7 @@ export class DrawView extends TextFileView {
 			const btn = sizes.createDiv({ cls: "quillstone-size" });
 			const dot = btn.createDiv({ cls: "quillstone-size-dot" });
 			const dotSize = 4 + size;
-			dot.style.width = `${dotSize}px`;
-			dot.style.height = `${dotSize}px`;
+			dot.setCssStyles({ width: `${dotSize}px`, height: `${dotSize}px` });
 			btn.setAttribute("aria-label", `Thickness ${size}`);
 			btn.addEventListener("click", () => this.setSize(size));
 			this.sizeButtons.set(size, btn);
@@ -2964,7 +2960,7 @@ export class DrawView extends TextFileView {
 		// l'ensemble a l'air désaligné plutôt que de former un bloc net.
 		const columns = Math.max(entry.palette.length, entry.recent.length, 1);
 		const gridTemplateColumns = `repeat(${columns}, ${SWATCH_COL_PX}px)`;
-		mainRow.style.gridTemplateColumns = gridTemplateColumns;
+		mainRow.setCssStyles({ gridTemplateColumns });
 
 		entry.palette.forEach((color, index) => {
 			this.paletteSwatchEls.push(this.buildSwatch(mainRow, color, tool, false, index));
@@ -2979,7 +2975,7 @@ export class DrawView extends TextFileView {
 		// voulu (voir syncColorActiveStates).
 		if (entry.recent.length > 0) {
 			const recentRow = column.createDiv({ cls: "quillstone-color-row quillstone-color-row-recent" });
-			recentRow.style.gridTemplateColumns = gridTemplateColumns;
+			recentRow.setCssStyles({ gridTemplateColumns });
 			for (const color of entry.recent) {
 				this.recentSwatchEls.push(this.buildSwatch(recentRow, color, tool, true));
 			}
@@ -2988,7 +2984,7 @@ export class DrawView extends TextFileView {
 		const pickerWrap = layout.createDiv({ cls: "quillstone-color-picker-wrap" });
 		const freePickerBtn = pickerWrap.createDiv({ cls: "quillstone-swatch quillstone-swatch-picker" });
 		freePickerBtn.empty(); // pas d'icône : le bouton EST la pastille, seule sa couleur de fond le représente
-		freePickerBtn.style.backgroundColor = entry.active;
+		freePickerBtn.setCssStyles({ backgroundColor: entry.active });
 		freePickerBtn.tabIndex = 0;
 		freePickerBtn.setAttribute("role", "button");
 		freePickerBtn.setAttribute("aria-label", "Custom color");
@@ -3033,7 +3029,7 @@ export class DrawView extends TextFileView {
 		const swatch = container.createDiv({
 			cls: isRecent ? "quillstone-swatch quillstone-swatch-recent" : "quillstone-swatch",
 		});
-		swatch.style.backgroundColor = color;
+		swatch.setCssStyles({ backgroundColor: color });
 		swatch.dataset.color = color;
 		swatch.tabIndex = 0;
 		swatch.setAttribute("role", "button");
@@ -3174,7 +3170,7 @@ export class DrawView extends TextFileView {
 			el.toggleClass("is-active", (el.dataset.color ?? "").toLowerCase() === active);
 		}
 		if (this.freePickerButtonEl) {
-			this.freePickerButtonEl.style.backgroundColor = this.activeColor;
+			this.freePickerButtonEl.setCssStyles({ backgroundColor: this.activeColor });
 		}
 	}
 
@@ -3796,9 +3792,9 @@ export class DrawView extends TextFileView {
 				this.straightenFlashHandle = null;
 				return;
 			}
-			this.straightenFlashHandle = requestAnimationFrame(tick);
+			this.straightenFlashHandle = window.requestAnimationFrame(tick);
 		};
-		this.straightenFlashHandle = requestAnimationFrame(tick);
+		this.straightenFlashHandle = window.requestAnimationFrame(tick);
 	}
 
 	/** Remet à zéro tout l'état de conversion : minuteur, ligne droite en cours, forme reconnue en cours, animation. À appeler à chaque fin de geste (validée ou annulée) et à la fermeture de la vue. */
@@ -3809,7 +3805,7 @@ export class DrawView extends TextFileView {
 		this.recognizedShapeAnchor = null;
 		this.straightenFlashStart = null;
 		if (this.straightenFlashHandle !== null) {
-			cancelAnimationFrame(this.straightenFlashHandle);
+			window.cancelAnimationFrame(this.straightenFlashHandle);
 			this.straightenFlashHandle = null;
 		}
 	}
@@ -5160,9 +5156,9 @@ export class DrawView extends TextFileView {
 			last = now;
 			this.marqueeDashOffset -= MARQUEE_DASH_SPEED_PX_PER_S * dt;
 			this.scheduleActiveRedraw();
-			this.marqueeAnimHandle = requestAnimationFrame(tick);
+			this.marqueeAnimHandle = window.requestAnimationFrame(tick);
 		};
-		this.marqueeAnimHandle = requestAnimationFrame(tick);
+		this.marqueeAnimHandle = window.requestAnimationFrame(tick);
 	}
 
 	/**
