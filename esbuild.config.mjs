@@ -1,5 +1,6 @@
 import esbuild from "esbuild";
 import process from "process";
+import { readFile } from "node:fs/promises";
 import { builtinModules as builtins } from "node:module";
 
 const prod = process.argv[2] === "production";
@@ -42,10 +43,45 @@ const virtualPdfWorkerSourcePlugin = {
   },
 };
 
+/**
+ * jsPDF (voir src/pdfExport.ts) inclut, dans le même fichier que le reste de
+ * son API, un mode de sortie qu'on n'appelle jamais (`output("pdfobjectnewwindow")`)
+ * qui injecte dynamiquement un <script> pointant vers un CDN externe pour
+ * prévisualiser le PDF dans une fenêtre. esbuild ne peut pas retirer une
+ * seule branche d'un switch à l'arbre : ce code mort finit donc dans main.js
+ * tel quel, où l'analyse statique d'Obsidian le signale comme injection de
+ * script à l'exécution — à raison, même si ce plugin ne déclenche jamais ce
+ * chemin. On neutralise ce seul appel à la source, avant le bundling. Si une
+ * mise à jour de jsPDF change cette ligne, ce plugin échoue bruyamment
+ * plutôt que de laisser passer l'injection en silence.
+ */
+const patchJsPdfScriptInjectionPlugin = {
+  name: "patch-jspdf-script-injection",
+  setup(build) {
+    build.onLoad({ filter: /jspdf[\\/]dist[\\/]jspdf\.es(\.min)?\.js$/ }, async (args) => {
+      const original = await readFile(args.path, "utf8");
+      // Anchor sur la forme de l'expression, pas sur un nom de variable
+      // minifié (instable d'un build de jsPDF à l'autre) : "<qqch>.document.createElement("script")".
+      const pattern = /[\w$]+\.document\.createElement\("script"\)/g;
+      const matches = original.match(pattern) ?? [];
+      if (matches.length !== 1) {
+        throw new Error(
+          `patch-jspdf-script-injection: expected exactly one match in ${args.path}, found ${matches.length} — jsPDF's internals likely changed, review before rebuilding.`
+        );
+      }
+      const patched = original.replace(
+        pattern,
+        '(() => { throw new Error("pdfobjectnewwindow output is disabled in this build."); })()'
+      );
+      return { contents: patched, loader: "js" };
+    });
+  },
+};
+
 const context = await esbuild.context({
   entryPoints: ["src/main.ts"],
   bundle: true,
-  plugins: [virtualPdfWorkerSourcePlugin],
+  plugins: [virtualPdfWorkerSourcePlugin, patchJsPdfScriptInjectionPlugin],
   external: [
     "obsidian",
     "electron",

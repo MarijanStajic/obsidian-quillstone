@@ -77,6 +77,7 @@ import { pickFile } from "./filePicker";
 import { MovePageModal } from "./movePageModal";
 import { GoToPageModal } from "./goToPageModal";
 import { CropImageModal } from "./cropModal";
+import { ConfirmModal } from "./confirmModal";
 import { ExportPage, buildPdfFromPages } from "./pdfExport";
 import {
 	Marquee,
@@ -1019,10 +1020,14 @@ export class DrawView extends TextFileView {
 		if (!rt) return;
 		if (rt.page.elements.length > 0) {
 			const count = rt.page.elements.length;
-			const ok = window.confirm(
-				`Delete this page? It contains ${count} element${count > 1 ? "s" : ""}, which will be permanently lost.`
-			);
-			if (!ok) return;
+			new ConfirmModal(
+				this.app,
+				"Delete this page?",
+				`It contains ${count} element${count > 1 ? "s" : ""}, which will be permanently lost.`,
+				"Delete",
+				() => this.deletePage(pageIndex)
+			).open();
+			return;
 		}
 		this.deletePage(pageIndex);
 	}

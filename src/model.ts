@@ -310,9 +310,10 @@ export function serialize(drawing: Drawing): string {
 		}
 	}
 
-	const pdfSources: Record<string, string> = Object.fromEntries(
-		Object.entries(drawing.pdfSources).filter(([id]) => referenced.has(id))
-	);
+	const pdfSources: Record<string, string> = {};
+	for (const [id, dataUri] of Object.entries(drawing.pdfSources)) {
+		if (referenced.has(id)) pdfSources[id] = dataUri;
+	}
 	const toWrite: Drawing =
 		Object.keys(pdfSources).length > 0 ? { ...drawing, pdfSources } : { version: drawing.version, pages: drawing.pages };
 
@@ -365,11 +366,11 @@ function sanitizePage(data: Partial<DrawingPage> & { strokes?: Stroke[] }): Draw
 /** `pdfSources` valide : un objet dont toutes les valeurs sont des chaînes (voir Drawing.pdfSources) — sinon ignoré silencieusement, comme le reste de sanitizePage() pour des données mal formées. */
 function sanitizePdfSources(data: unknown): Record<string, string> | undefined {
 	if (typeof data !== "object" || data === null) return undefined;
-	const entries = Object.entries(data as Record<string, unknown>).filter(([, v]) => typeof v === "string") as [
-		string,
-		string,
-	][];
-	return entries.length > 0 ? (Object.fromEntries(entries) as Record<string, string>) : undefined;
+	const result: Record<string, string> = {};
+	for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+		if (typeof value === "string") result[key] = value;
+	}
+	return Object.keys(result).length > 0 ? result : undefined;
 }
 
 export function parse(raw: string): Drawing {
