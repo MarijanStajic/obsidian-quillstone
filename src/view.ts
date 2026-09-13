@@ -128,7 +128,19 @@ const PDF_EXPORT_SCALE = 2;
 
 // --- Conversion d'un trait en ligne droite par maintien ---------------------
 
-/** Mouvement (repère du document) au-delà duquel le minuteur de conversion se réarme : sans seuil, la moindre micro-vibration du stylet empêcherait toute conversion. */
+/**
+ * Mouvement (en pixels ÉCRAN/CSS, PAS en repère document) au-delà duquel le
+ * minuteur de conversion se réarme : sans seuil, la moindre micro-vibration
+ * du stylet empêcherait toute conversion. Délibérément en repère écran plutôt
+ * que document — un repère document se comprime ou s'étire avec le zoom
+ * (voir screenToDocument), si bien qu'un seuil exprimé dans cet espace-là
+ * rendait le maintien immobile presque impossible à détecter dès qu'on
+ * dessinait dézoomé (page entière visible) : la même micro-vibration
+ * physique, amplifiée en repère document par le zoom réduit, dépassait
+ * constamment le seuil et réarmait le minuteur en boucle sans jamais le
+ * laisser expirer (voir le bug signalé : la reconnaissance de forme par
+ * maintien ne se déclenchait presque jamais).
+ */
 const STRAIGHTEN_STILL_THRESHOLD_PX = 3;
 const ANGLE_SNAP_STEP_DEG = 15;
 /** Distance angulaire en deçà de laquelle l'aimantation s'active spontanément ("quand le curseur en approche"). */
@@ -2675,6 +2687,29 @@ export class DrawView extends TextFileView {
 		this.scheduleCacheRegenAfterSettle();
 	}
 
+	/**
+	 * Annule un panoramique à UN SEUL doigt encore actif (jamais un pincement
+	 * à deux doigts, bien moins susceptible d'être une paume) : appelé dès
+	 * qu'un stylet retouche l'écran (voir onPointerDown). Sans ça, un contact
+	 * tactile qui traîne à ce moment-là — presque toujours la paume qui se
+	 * repose entre deux mots plutôt qu'un geste de navigation volontaire —
+	 * garderait viewportGesture actif et bloquerait le pointerdown du stylet
+	 * lui-même (voir le garde-fou `if (this.viewportGesture) return` tout en
+	 * haut d'onPointerDown), obligeant à relever complètement la paume avant
+	 * de pouvoir reprendre le trait. On retire aussi ce doigt de `pointers`
+	 * (sinon countActiveTouches() le compterait encore) et on l'ajoute à
+	 * ignoredPointerIds pour que son pointerup, quand il viendra, ne fasse
+	 * plus rien (voir onPointerMove/onPointerUp).
+	 */
+	private preemptStrayTouchPan(): void {
+		const gesture = this.viewportGesture;
+		if (!gesture || gesture.type !== "pan") return;
+		this.pointers.delete(gesture.pointerId);
+		this.ignoredPointerIds.add(gesture.pointerId);
+		this.viewportGesture = null;
+		this.updateCursor();
+	}
+
 	// --- Barre d'outils ---------------------------------------------------------
 
 	private buildToolbar(): void {
@@ -3476,7 +3511,7 @@ export class DrawView extends TextFileView {
 	// points (origine, extrémité libre) — voir updateStraightLine, qui est
 	// l'unique endroit qui les modifie ensuite.
 
-	/** (Ré)arme le minuteur de conversion à `point` (repère de la page du trait en cours) : tout appel ultérieur avant son expiration l'annule et le redémarre (voir updateStillnessTimer). */
+	/** (Ré)arme le minuteur de conversion à `point` (coordonnées ÉCRAN/CSS — clientX/clientY, pas le repère document/page, voir STRAIGHTEN_STILL_THRESHOLD_PX) : tout appel ultérieur avant son expiration l'annule et le redémarre (voir updateStillnessTimer). */
 	private armStillnessTimer(point: [number, number]): void {
 		this.clearStillnessTimer();
 		this.strokeHoldAnchor = point;
@@ -3494,7 +3529,7 @@ export class DrawView extends TextFileView {
 		this.strokeHoldAnchor = null;
 	}
 
-	/** Appelé pour chaque point freehand capturé tant que le trait n'est pas encore converti : réarme le minuteur dès que le point s'éloigne de plus de STRAIGHTEN_STILL_THRESHOLD_PX de l'ancre courante. */
+	/** Appelé pour chaque point freehand capturé tant que le trait n'est pas encore converti : réarme le minuteur dès que le point (coordonnées écran, comme armStillnessTimer) s'éloigne de plus de STRAIGHTEN_STILL_THRESHOLD_PX de l'ancre courante. */
 	private updateStillnessTimer(point: [number, number]): void {
 		if (!this.plugin.settings.straightenOnHold) return;
 		if (!this.strokeHoldAnchor) {
@@ -3828,6 +3863,14 @@ export class DrawView extends TextFileView {
 
 		if (event.pointerType === "pen") {
 			this.lastPenActiveAt = performance.now();
+			// Le stylet a toujours priorité sur un panoramique à un seul doigt en
+			// cours : ce doigt qui traîne encore au moment où le stylet retouche
+			// l'écran est presque toujours la paume qui se pose entre deux mots
+			// (voir le bug signalé — reposer la main pour continuer d'écrire
+			// bloquait le stylet jusqu'à ce qu'on relève cette paume), jamais un
+			// geste de navigation volontaire pendant qu'on dessine. Un pincement à
+			// deux doigts, lui, n'est jamais annulé ici (voir preemptStrayTouchPan).
+			this.preemptStrayTouchPan();
 		}
 
 		if (event.pointerType === "touch") {
@@ -3859,12 +3902,18 @@ export class DrawView extends TextFileView {
 		if (event.pointerType === "touch") {
 			// Le doigt ne dessine, ne sélectionne ni n'efface jamais : seuls le
 			// stylet et la souris interagissent avec le contenu. Un seul doigt
-			// fait toujours défiler la page (comme un geste à deux doigts
-			// auparavant, voir le bug signalé — on devait maintenir deux doigts
-			// pour naviguer) ; le pincement à deux doigts reste géré plus haut.
-			// Le menu contextuel par appui long reste disponible : on l'arme ici
-			// comme avant, il s'ouvrira si le doigt reste immobile assez
-			// longtemps plutôt que de glisser en panoramique (voir
+			// posé dans la zone noire (hors de toute feuille) fait défiler la
+			// page ; posé DIRECTEMENT SUR une feuille, en revanche, il ne fait
+			// rien du tout — jamais de panoramique déclenché par un doigt qui se
+			// repose sur la feuille par inadvertance pendant qu'on écrit (voir le
+			// bug signalé). Le pincement à deux doigts, lui, reste géré plus haut
+			// et fonctionne n'importe où, feuille comprise.
+			const [touchDocX, touchDocY] = this.eventToXY(event, this.committedCanvas.getBoundingClientRect());
+			if (this.hitPage(touchDocX, touchDocY) !== null) return;
+
+			// Le menu contextuel par appui long reste disponible dans la zone
+			// noire : on l'arme ici comme avant, il s'ouvrira si le doigt reste
+			// immobile assez longtemps plutôt que de glisser en panoramique (voir
 			// updateLongPressMenu, appelé aussi pendant un panoramique).
 			event.preventDefault();
 			this.armLongPressMenu(event.clientX, event.clientY);
@@ -3999,7 +4048,7 @@ export class DrawView extends TextFileView {
 		if (event.shiftKey) {
 			this.triggerStraighten(true);
 		} else if (this.plugin.settings.straightenOnHold) {
-			this.armStillnessTimer([x, y]);
+			this.armStillnessTimer([event.clientX, event.clientY]);
 		}
 		this.scheduleActiveRedraw();
 	};
@@ -4137,7 +4186,7 @@ export class DrawView extends TextFileView {
 			const [rawX, rawY] = this.toPageLocal(pageIndex, docX, docY);
 			const [x, y] = this.clampToPage(pageIndex, rawX, rawY);
 			this.activeStroke.points.push([x, y, e.pressure]);
-			this.updateStillnessTimer([x, y]);
+			this.updateStillnessTimer([e.clientX, e.clientY]);
 		}
 		this.scheduleActiveRedraw();
 	};
@@ -4312,9 +4361,13 @@ export class DrawView extends TextFileView {
 	};
 
 	/**
-	 * Termine le trait : tente une dernière reconnaissance de forme si le
-	 * maintien immobile ne l'a pas déjà fait (voir plus bas), enregistre le
-	 * résultat dans l'historique, ne redessine QUE la zone couverte par ce
+	 * Termine le trait : n'enregistre une forme reconnue que si le maintien
+	 * immobile l'a déjà fait pendant le geste (voir triggerHoldConversion) —
+	 * jamais de seconde tentative au relâchement : la reconnaissance ne doit
+	 * se déclencher QUE quand le stylet reste immobile après avoir refermé la
+	 * forme, jamais simplement parce que le trait, une fois fini, y
+	 * ressemblait (un rond de correction dans un mot manuscrit deviendrait
+	 * sinon un cercle malgré lui). Ne redessine QUE la zone couverte par ce
 	 * trait dans le cache de la page (voir markDirtyRegion/flushCommittedRedraw
 	 * — jamais render(), qui retracerait toute la page à chaque trait et
 	 * introduit une latence perceptible dès qu'une page contient beaucoup de
@@ -4325,39 +4378,13 @@ export class DrawView extends TextFileView {
 	private finishStroke(): void {
 		const stroke = this.activeStroke;
 		const pageIndex = this.activeStrokePageIndex;
-		const wasStraightened = this.straightLine !== null;
-		let recognized = this.recognizedShape;
+		const recognized = this.recognizedShape;
 		this.activePointerId = null;
 		this.activeStroke = null;
 		this.activeStrokePageIndex = null;
 		this.resetStraightLineState();
 		this.clearActiveCanvasFull();
 		if (!stroke || pageIndex === null) return;
-
-		// Le maintien immobile (triggerHoldConversion) ne reconnaît une forme
-		// que si l'utilisateur marque une pause avant de relever le stylet — un
-		// geste rare quand on dessine un rond ou un rectangle d'un seul trait
-		// rapide. On retente donc la même reconnaissance ici, au relâchement,
-		// indépendamment du réglage straightenOnHold (qui, d'après son propre
-		// intitulé dans les réglages, ne concerne que la conversion en ligne
-		// droite, pas la reconnaissance de forme).
-		if (!recognized && !wasStraightened) {
-			const candidate = this.recognizeClosedShape(stroke.points);
-			if (candidate) {
-				recognized = {
-					id: stroke.id,
-					type: "shape",
-					shape: candidate.shape,
-					x: candidate.x,
-					y: candidate.y,
-					width: candidate.width,
-					height: candidate.height,
-					rotation: 0,
-					color: stroke.color,
-					size: stroke.size,
-				};
-			}
-		}
 
 		if (recognized) {
 			// Le tracé au stylo/surligneur d'origine est entièrement remplacé par
