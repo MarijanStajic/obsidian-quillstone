@@ -3978,7 +3978,17 @@ export class DrawView extends TextFileView {
 		// pour autre chose.
 		this.cancelMomentumScroll();
 
-		this.contentEl.focus();
+		// Garde le focus clavier sur la vue (raccourcis Ctrl+Z, etc.) sans jamais
+		// re-focuser un élément déjà actif : .focus() est censé être un no-op
+		// dans ce cas, mais on évite quand même l'appel — sur certains WebView
+		// mobiles (Obsidian sur iPad), refocuser peut réveiller des écouteurs
+		// coûteux côté application hôte (barre d'outils, onglet actif...) à
+		// CHAQUE pointerdown, donc à chaque trait, indépendamment du contenu de
+		// la page (voir le bug signalé — le délai apparaît dès le tout premier
+		// trait d'une feuille vide).
+		if (document.activeElement !== this.contentEl) {
+			this.contentEl.focus();
+		}
 
 		if (event.pointerType === "pen") {
 			this.lastPenActiveAt = performance.now();
