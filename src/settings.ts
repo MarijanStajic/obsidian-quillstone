@@ -187,6 +187,16 @@ export interface QuillStoneSettings {
 	straightenOnHold: boolean;
 	/** Durée d'immobilité (ms) avant la conversion en ligne droite. */
 	straightenHoldDelayMs: number;
+	/**
+	 * Vrai dès que l'avertissement Scribble (voir main.ts:onload) a été
+	 * affiché une fois — jamais réaffiché ensuite, y compris après une mise à
+	 * jour ou une réinstallation de l'app. Absent pour un utilisateur déjà
+	 * installé avant l'ajout de ce réglage : mergeSettings() le ramène alors à
+	 * `false` (valeur par défaut), donc l'avertissement s'affiche une fois
+	 * pour lui aussi à sa prochaine ouverture — voulu, il a autant besoin de
+	 * cette info qu'une nouvelle installation.
+	 */
+	hasShownScribbleNotice: boolean;
 }
 
 export const DEFAULT_SETTINGS: QuillStoneSettings = {
@@ -210,6 +220,7 @@ export const DEFAULT_SETTINGS: QuillStoneSettings = {
 	newPageOrientation: "portrait",
 	straightenOnHold: true,
 	straightenHoldDelayMs: 600,
+	hasShownScribbleNotice: false,
 };
 
 function cloneDefaultSettings(): QuillStoneSettings {

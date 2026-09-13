@@ -6,6 +6,7 @@ import {
 	Menu,
 	Notice,
 	PaneType,
+	Platform,
 	Plugin,
 	TFile,
 	TFolder,
@@ -38,6 +39,22 @@ export default class QuillStonePlugin extends Plugin {
 	async onload(): Promise<void> {
 		this.settings = mergeSettings(await this.loadData());
 		this.preview = new DrawPreviewManager(this);
+
+		// Affiché une seule fois, jamais réaffiché ensuite (voir
+		// QuillStoneSettings.hasShownScribbleNotice) : iPadOS peut, via sa
+		// fonction Scribble, avaler silencieusement des événements du stylet
+		// juste après qu'il a touché l'écran (bug WebKit documenté) — QuillStone
+		// s'en protège déjà côté code, mais désactiver Scribble reste la
+		// garantie la plus fiable pour qui dessine beaucoup. Seulement sur
+		// l'app iOS : ce réglage n'existe pas ailleurs.
+		if (Platform.isIosApp && !this.settings.hasShownScribbleNotice) {
+			this.settings.hasShownScribbleNotice = true;
+			void this.saveSettings();
+			new Notice(
+				"QuillStone tip: on iPad, if the pen ever seems briefly unresponsive right after lifting it, go to Settings → Apple Pencil → Scribble and turn it off. iPadOS's Scribble feature can interfere with drawing input in web-based apps like this one.",
+				15000
+			);
+		}
 
 		// 1. La vue qui affichera les feuilles.
 		this.registerView(VIEW_TYPE_DRAW, (leaf) => new DrawView(leaf, this));

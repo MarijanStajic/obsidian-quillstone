@@ -2472,63 +2472,6 @@ export class DrawView extends TextFileView {
 		return contactSize <= STYLUS_LIKE_CONTACT_MAX_PX;
 	}
 
-	/**
-	 * DIAGNOSTIC TEMPORAIRE (voir le bug signalé, toujours pas résolu après
-	 * plusieurs correctifs ciblés) — à retirer une fois la vraie cause
-	 * identifiée. Affiche en overlay, directement sur la vue, les derniers
-	 * événements pointeur avec leur issue exacte (quelle branche
-	 * d'onPointerDown les a traités ou bloqués), pour voir sans outil de
-	 * développement ce qui se passe réellement sur l'appareil au moment du
-	 * blocage — en particulier si l'événement du stylet arrive même jusqu'ici
-	 * (sinon le blocage n'est pas dans ce fichier du tout).
-	 */
-	private debugLogLines: string[] = [];
-	private debugLogEl: HTMLElement | null = null;
-	private debugLogLastTs: number | null = null;
-
-	private debugLog(tag: string, event: PointerEvent): void {
-		if (!this.contentEl) return;
-		if (!this.debugLogEl) {
-			this.debugLogEl = this.contentEl.createDiv();
-			this.debugLogEl.setCssStyles({
-				position: "absolute",
-				top: "4px",
-				left: "4px",
-				zIndex: "9999",
-				background: "rgba(0,0,0,0.8)",
-				color: "#4f4",
-				fontFamily: "monospace",
-				fontSize: "10px",
-				lineHeight: "1.3",
-				padding: "4px 6px",
-				whiteSpace: "pre",
-				pointerEvents: "none",
-				maxWidth: "95vw",
-				maxHeight: "40vh",
-				overflow: "hidden",
-			});
-		}
-		const now = performance.now();
-		const delta = this.debugLogLastTs !== null ? Math.round(now - this.debugLogLastTs) : 0;
-		this.debugLogLastTs = now;
-		const w = typeof event.width === "number" ? event.width.toFixed(1) : "?";
-		const h = typeof event.height === "number" ? event.height.toFixed(1) : "?";
-		const p = typeof event.pressure === "number" ? event.pressure.toFixed(2) : "?";
-		const line = `+${delta}ms ${tag} type=${event.pointerType} id=${event.pointerId} w=${w} h=${h} p=${p}`;
-		this.pushDebugLine(line);
-	}
-
-	/** Comme debugLog, mais pour une ligne de texte libre (pas d'événement pointeur) — voir son unique appelant, qui rapporte le nombre de points accumulés dans le trait au moment du relâchement. */
-	private debugLogText(text: string): void {
-		this.pushDebugLine(text);
-	}
-
-	private pushDebugLine(line: string): void {
-		this.debugLogLines.push(line);
-		if (this.debugLogLines.length > 30) this.debugLogLines.shift();
-		if (this.debugLogEl) this.debugLogEl.setText(this.debugLogLines.join("\n"));
-	}
-
 	private countActiveTouches(): number {
 		let count = 0;
 		for (const [id, e] of this.pointers) {
@@ -4104,8 +4047,6 @@ export class DrawView extends TextFileView {
 	// --- Capture du geste (trait, gomme, panoramique, pincement) -----------------
 
 	private onPointerDown = (event: PointerEvent): void => {
-		this.debugLog("DOWN", event); // DIAGNOSTIC TEMPORAIRE — voir debugLog
-
 		if (event.button === 2) return; // clic droit réservé au menu contextuel (voir onContextMenu) : jamais un trait ni une gomme, quel que soit l'outil actif
 
 		// Tout nouveau contact interrompt un défilement par inertie encore en
@@ -4166,7 +4107,6 @@ export class DrawView extends TextFileView {
 			// feuille alors que le stylet a déjà servi dans cette session n'est
 			// jamais un geste volontaire — ignoré en permanence, jamais
 			// seulement pendant une fenêtre de temps.
-			this.debugLog("PALM-IGNORE", event); // DIAGNOSTIC TEMPORAIRE
 			this.ignoredPointerIds.add(event.pointerId);
 			return;
 		}
@@ -4176,21 +4116,14 @@ export class DrawView extends TextFileView {
 
 		const activeTouches = this.countActiveTouches();
 		if (activeTouches === 2) {
-			this.debugLog("PINCH", event); // DIAGNOSTIC TEMPORAIRE
 			event.preventDefault();
 			this.clearLongPressMenu(); // un deuxième doigt rejoint : c'est un pincement, plus un appui long candidat
 			this.startPinchGesture();
 			return;
 		}
-		if (activeTouches > 2) {
-			this.debugLog("3+TOUCH", event); // DIAGNOSTIC TEMPORAIRE
-			return; // au-delà de deux doigts, on ignore le reste du geste
-		}
+		if (activeTouches > 2) return; // au-delà de deux doigts, on ignore le reste du geste
 
-		if (this.viewportGesture) {
-			this.debugLog("BLOCKED-GESTURE", event); // DIAGNOSTIC TEMPORAIRE
-			return; // un panoramique/pincement est déjà en cours
-		}
+		if (this.viewportGesture) return; // un panoramique/pincement est déjà en cours
 
 		if (event.pointerType === "touch" && !isStylus) {
 			// Le doigt ne dessine, ne sélectionne ni n'efface jamais : seuls le
@@ -4212,7 +4145,6 @@ export class DrawView extends TextFileView {
 			// comme avant, il s'ouvrira si le doigt reste immobile assez
 			// longtemps plutôt que de glisser en panoramique (voir
 			// updateLongPressMenu, appelé aussi pendant un panoramique).
-			this.debugLog("PAN-TOUCH", event); // DIAGNOSTIC TEMPORAIRE
 			event.preventDefault();
 			this.armLongPressMenu(event.clientX, event.clientY);
 			this.startPanGesture(event, startedOffSheet);
@@ -4220,16 +4152,12 @@ export class DrawView extends TextFileView {
 		}
 
 		if (this.isPanTrigger(event)) {
-			this.debugLog("PAN-TRIGGER", event); // DIAGNOSTIC TEMPORAIRE
 			event.preventDefault();
 			this.startPanGesture(event, false);
 			return;
 		}
 
-		if (this.activePointerId !== null) {
-			this.debugLog("BLOCKED-ACTIVE", event); // DIAGNOSTIC TEMPORAIRE
-			return; // un seul trait/gomme à la fois
-		}
+		if (this.activePointerId !== null) return; // un seul trait/gomme à la fois
 
 		const rect = this.committedCanvas.getBoundingClientRect();
 		const tool = this.plugin.settings.tool;
@@ -4333,7 +4261,6 @@ export class DrawView extends TextFileView {
 			return;
 		}
 
-		this.debugLog("STROKE-START", event); // DIAGNOSTIC TEMPORAIRE
 		const size =
 			tool === "highlighter" ? this.plugin.settings.size * HIGHLIGHTER_SIZE_MULTIPLIER : this.plugin.settings.size;
 		this.activeStroke = {
@@ -4500,7 +4427,6 @@ export class DrawView extends TextFileView {
 	};
 
 	private onPointerUp = (event: PointerEvent): void => {
-		this.debugLog("UP", event); // DIAGNOSTIC TEMPORAIRE
 		this.ignoredPointerIds.delete(event.pointerId);
 		this.pointers.delete(event.pointerId);
 		this.clearLongPressMenu();
@@ -4579,13 +4505,6 @@ export class DrawView extends TextFileView {
 				const [rawX, rawY] = this.toPageLocal(pageIndex, docX, docY);
 				this.activeStroke.points.push(this.clampPointToPage(pageIndex, [rawX, rawY, event.pressure]));
 			}
-			// DIAGNOSTIC TEMPORAIRE — voir debugLog : combien de points le trait
-			// a-t-il accumulés avant d'être commis ? Un trait "raté" avec un seul
-			// point (jamais de pointermove reçu entre down et up) se comporterait
-			// différemment d'un trait normal correctement rejeté ailleurs.
-			this.debugLogText(
-				`  -> finishStroke points=${this.activeStroke.points.length} page=${pageIndex} tool=${this.activeStroke.tool} color=${this.activeStroke.color} paper=${this.currentColors().paper} size=${this.activeStroke.size}`
-			);
 			this.finishStroke();
 			return;
 		}
@@ -4594,7 +4513,6 @@ export class DrawView extends TextFileView {
 	};
 
 	private onPointerCancel = (event: PointerEvent): void => {
-		this.debugLog("CANCEL", event); // DIAGNOSTIC TEMPORAIRE
 		this.ignoredPointerIds.delete(event.pointerId);
 		this.pointers.delete(event.pointerId);
 		this.clearLongPressMenu();

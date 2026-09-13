@@ -18,17 +18,6 @@ Handwritten sheets for [Obsidian](https://obsidian.md): draw with a stylus or mo
 - **Laser pointer** — a temporary, non-persisted pointer for presenting without marking up the page.
 - **Undo/redo**, per-page color palettes with recently-used colors, light/dark theme support.
 
-## Installation
-
-This plugin is not yet on the Obsidian community plugin list. Until then, install it manually:
-
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](../../releases/latest).
-2. Create a folder named `quillstone` inside your vault's `.obsidian/plugins/` directory.
-3. Copy the three files into that folder.
-4. Reload Obsidian, then enable **QuillStone** in Settings → Community plugins.
-
-Or install it via [BRAT](https://github.com/TfTHacker/obsidian42-brat) by pointing it at this repository.
-
 ## Usage
 
 - Create a new sheet from the command palette (`QuillStone: New sheet`) or by right-clicking a folder/note.
