@@ -192,8 +192,17 @@ const RECOGNIZE_MIN_POINTS = 8;
 const RECOGNIZE_MIN_SIZE_PX = 20;
 /** Écart toléré entre le premier et le dernier point du tracé, en proportion de la diagonale de sa boîte englobante — en deçà, la boucle est considérée refermée sur elle-même. */
 const CLOSED_PATH_GAP_RATIO = 0.22;
-/** Coefficient de variation (écart-type / moyenne) des distances au centre : en dessous, le tracé est jugé assez rond pour devenir une ellipse. */
-const CIRCLE_ROUNDNESS_THRESHOLD = 0.2;
+/**
+ * Coefficient de variation (écart-type / moyenne) des distances au centre :
+ * en dessous, le tracé est jugé assez rond pour devenir une ellipse. Relevé
+ * de 0.2 à 0.28 (voir le bug signalé — les ronds tracés à main levée étaient
+ * refusés trop souvent) : un rond dessiné rapidement au stylet a rarement un
+ * rayon parfaitement constant, et ce test n'est atteint de toute façon que
+ * pour un tracé qui a déjà échoué à se simplifier en 3 ou 4 sommets nets
+ * (voir recognizeClosedShape) — l'élargir ne risque donc pas de faire
+ * prendre un rectangle/triangle pour un rond.
+ */
+const CIRCLE_ROUNDNESS_THRESHOLD = 0.28;
 /** Tolérance de simplification agressive (proportion de la plus grande dimension de la boîte englobante) pour ne garder que les sommets dominants d'une boucle NON ronde — 3 sommets restants = triangle, 4 = rectangle, tout le reste = pas reconnu. */
 const CORNER_SIMPLIFY_RATIO = 0.09;
 
@@ -358,6 +367,15 @@ const MAX_CACHE_SCALE = 4;
 /** Écart relatif d'échelle en dessous duquel on ne régénère pas le cache (un panoramique pur ne doit rien régénérer). */
 const CACHE_RESCALE_THRESHOLD = 0.05;
 
+// --- Défilement par inertie (zone noire uniquement, voir startMomentumScroll) ----
+
+/** Vitesse relâchée (px écran / ms) en dessous de laquelle on ne lance aucune inertie : un simple lâcher lent doit s'arrêter net, comme un glissement direct sur la feuille. */
+const MOMENTUM_MIN_START_SPEED = 0.15;
+/** Vitesse (px écran / ms) en dessous de laquelle l'inertie déjà lancée s'arrête : le mouvement résiduel y est de toute façon imperceptible. */
+const MOMENTUM_STOP_SPEED = 0.02;
+/** Facteur de décroissance exponentielle de la vélocité par milliseconde — proche de mais sous 1 pour un ralentissement progressif façon page web mobile, ni un arrêt sec ni un glissement interminable. */
+const MOMENTUM_FRICTION_PER_MS = 0.998;
+
 function clamp(value: number, min: number, max: number): number {
 	return Math.min(max, Math.max(min, value));
 }
@@ -377,6 +395,22 @@ type ViewportGesture =
 			startClientY: number;
 			startOffsetX: number;
 			startOffsetY: number;
+			/**
+			 * Faux si le doigt a débuté ce panoramique directement sur une feuille
+			 * (voir onPointerDown) : seul un panoramique débuté dans la zone noire
+			 * continue par inertie une fois le doigt relevé (voir
+			 * maybeEndViewportGesture/startMomentumScroll) — un glissement direct
+			 * sur la feuille s'arrête net, comme avant, pour rester prévisible
+			 * pendant qu'on regarde son contenu de près.
+			 */
+			startedOffSheet: boolean;
+			/** Horodatage/position du dernier pointermove, pour estimer la vélocité au relâchement (voir updateViewportGesture). */
+			lastMoveTime: number;
+			lastClientX: number;
+			lastClientY: number;
+			/** Vélocité lissée en pixels écran par milliseconde (voir startMomentumScroll). */
+			velocityX: number;
+			velocityY: number;
 	  }
 	| {
 			type: "pinch";
@@ -520,6 +554,8 @@ export class DrawView extends TextFileView {
 	/** Vrai si setState() a restauré un cadrage enregistré : évite d'écraser cette restauration par un fitToWindow() par défaut dans onOpen(). */
 	private viewportRestored = false;
 	private viewportGesture: ViewportGesture | null = null;
+	/** Défilement par inertie après un panoramique lâché avec de la vitesse (voir startMomentumScroll) — jamais actif en même temps qu'un viewportGesture (l'un annule toujours l'autre). */
+	private momentumHandle: number | null = null;
 	private viewportRedrawScheduled = false;
 	private spacePressed = false;
 	/** Tous les pointeurs actuellement enfoncés, tactiles compris — nécessaire pour distinguer un doigt unique (rejeté après usage du stylet) d'un geste à deux doigts (accepté). */
@@ -2605,7 +2641,8 @@ export class DrawView extends TextFileView {
 		menu.showAtPosition({ x, y });
 	}
 
-	private startPanGesture(event: PointerEvent): void {
+	private startPanGesture(event: PointerEvent, startedOffSheet: boolean): void {
+		this.cancelMomentumScroll();
 		this.viewportGesture = {
 			type: "pan",
 			pointerId: event.pointerId,
@@ -2613,6 +2650,12 @@ export class DrawView extends TextFileView {
 			startClientY: event.clientY,
 			startOffsetX: this.viewport.offsetX,
 			startOffsetY: this.viewport.offsetY,
+			startedOffSheet,
+			lastMoveTime: performance.now(),
+			lastClientX: event.clientX,
+			lastClientY: event.clientY,
+			velocityX: 0,
+			velocityY: 0,
 		};
 		this.updateCursor();
 	}
@@ -2654,6 +2697,23 @@ export class DrawView extends TextFileView {
 			if (event.pointerId !== gesture.pointerId) return;
 			this.viewport.offsetX = gesture.startOffsetX + (event.clientX - gesture.startClientX);
 			this.viewport.offsetY = gesture.startOffsetY + (event.clientY - gesture.startClientY);
+
+			// Vélocité lissée (moyenne mobile exponentielle) pour l'inertie au
+			// relâchement (voir startMomentumScroll) — un delta brut entre deux
+			// seuls derniers points serait trop bruité (un pointermove peut
+			// arriver à intervalles très irréguliers).
+			const now = performance.now();
+			const dt = now - gesture.lastMoveTime;
+			if (dt > 0) {
+				const instVelX = (event.clientX - gesture.lastClientX) / dt;
+				const instVelY = (event.clientY - gesture.lastClientY) / dt;
+				const alpha = 0.35;
+				gesture.velocityX = gesture.velocityX + alpha * (instVelX - gesture.velocityX);
+				gesture.velocityY = gesture.velocityY + alpha * (instVelY - gesture.velocityY);
+				gesture.lastMoveTime = now;
+				gesture.lastClientX = event.clientX;
+				gesture.lastClientY = event.clientY;
+			}
 			this.onViewportChanged();
 			return;
 		}
@@ -2685,6 +2745,59 @@ export class DrawView extends TextFileView {
 		this.viewportGesture = null;
 		this.updateCursor();
 		this.scheduleCacheRegenAfterSettle();
+
+		// L'inertie façon page web mobile ne s'applique qu'à un panoramique
+		// débuté dans la zone noire (voir startPanGesture/onPointerDown) — un
+		// glissement direct sur la feuille s'arrête net, comme un panoramique
+		// "de travail" classique.
+		if (gesture.type === "pan" && gesture.startedOffSheet) {
+			this.startMomentumScroll(gesture.velocityX, gesture.velocityY);
+		}
+	}
+
+	/**
+	 * Défilement par inertie après un panoramique lâché avec de la vitesse
+	 * (voir maybeEndViewportGesture) : ralentit exponentiellement (voir
+	 * MOMENTUM_FRICTION_PER_MS) jusqu'à devenir imperceptible, comme le
+	 * défilement d'une page web sur mobile. N'importe quel nouveau geste
+	 * (voir startPanGesture/startPinchGesture) l'annule immédiatement — on ne
+	 * continue jamais deux mouvements de vue à la fois.
+	 */
+	private startMomentumScroll(vx: number, vy: number): void {
+		this.cancelMomentumScroll();
+		if (Math.hypot(vx, vy) < MOMENTUM_MIN_START_SPEED) return;
+
+		let velocityX = vx;
+		let velocityY = vy;
+		let lastTime = performance.now();
+
+		const tick = (now: number): void => {
+			const dt = now - lastTime;
+			lastTime = now;
+
+			const decay = Math.pow(MOMENTUM_FRICTION_PER_MS, dt);
+			velocityX *= decay;
+			velocityY *= decay;
+
+			this.viewport.offsetX += velocityX * dt;
+			this.viewport.offsetY += velocityY * dt;
+			this.onViewportChanged();
+
+			if (Math.hypot(velocityX, velocityY) < MOMENTUM_STOP_SPEED) {
+				this.momentumHandle = null;
+				this.scheduleCacheRegenAfterSettle();
+				return;
+			}
+			this.momentumHandle = window.requestAnimationFrame(tick);
+		};
+		this.momentumHandle = window.requestAnimationFrame(tick);
+	}
+
+	private cancelMomentumScroll(): void {
+		if (this.momentumHandle !== null) {
+			window.cancelAnimationFrame(this.momentumHandle);
+			this.momentumHandle = null;
+		}
 	}
 
 	/**
@@ -3859,6 +3972,12 @@ export class DrawView extends TextFileView {
 	private onPointerDown = (event: PointerEvent): void => {
 		if (event.button === 2) return; // clic droit réservé au menu contextuel (voir onContextMenu) : jamais un trait ni une gomme, quel que soit l'outil actif
 
+		// Tout nouveau contact interrompt un défilement par inertie encore en
+		// cours (voir startMomentumScroll) : comme sur une page web mobile, on
+		// ne continue jamais un défilement pendant qu'on touche déjà l'écran
+		// pour autre chose.
+		this.cancelMomentumScroll();
+
 		this.contentEl.focus();
 
 		if (event.pointerType === "pen") {
@@ -3902,28 +4021,29 @@ export class DrawView extends TextFileView {
 		if (event.pointerType === "touch") {
 			// Le doigt ne dessine, ne sélectionne ni n'efface jamais : seuls le
 			// stylet et la souris interagissent avec le contenu. Un seul doigt
-			// posé dans la zone noire (hors de toute feuille) fait défiler la
-			// page ; posé DIRECTEMENT SUR une feuille, en revanche, il ne fait
-			// rien du tout — jamais de panoramique déclenché par un doigt qui se
-			// repose sur la feuille par inadvertance pendant qu'on écrit (voir le
-			// bug signalé). Le pincement à deux doigts, lui, reste géré plus haut
-			// et fonctionne n'importe où, feuille comprise.
+			// fait toujours défiler la page, feuille comprise (glisser-déposer
+			// classique) ; posé dans la zone noire (hors de toute feuille), le
+			// relâchement continue en plus par inertie, comme une page web sur
+			// mobile (voir startedOffSheet/startMomentumScroll) — posé sur la
+			// feuille, le défilement s'arrête net dès qu'on lâche, pour rester
+			// prévisible pendant qu'on regarde son contenu de près. Le pincement à
+			// deux doigts, lui, reste géré plus haut et fonctionne n'importe où.
 			const [touchDocX, touchDocY] = this.eventToXY(event, this.committedCanvas.getBoundingClientRect());
-			if (this.hitPage(touchDocX, touchDocY) !== null) return;
+			const startedOffSheet = this.hitPage(touchDocX, touchDocY) === null;
 
-			// Le menu contextuel par appui long reste disponible dans la zone
-			// noire : on l'arme ici comme avant, il s'ouvrira si le doigt reste
-			// immobile assez longtemps plutôt que de glisser en panoramique (voir
+			// Le menu contextuel par appui long reste disponible : on l'arme ici
+			// comme avant, il s'ouvrira si le doigt reste immobile assez
+			// longtemps plutôt que de glisser en panoramique (voir
 			// updateLongPressMenu, appelé aussi pendant un panoramique).
 			event.preventDefault();
 			this.armLongPressMenu(event.clientX, event.clientY);
-			this.startPanGesture(event);
+			this.startPanGesture(event, startedOffSheet);
 			return;
 		}
 
 		if (this.isPanTrigger(event)) {
 			event.preventDefault();
-			this.startPanGesture(event);
+			this.startPanGesture(event, false);
 			return;
 		}
 
