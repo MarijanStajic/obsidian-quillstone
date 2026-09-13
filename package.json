@@ -1,6 +1,6 @@
 {
   "name": "quillstone",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Handwritten sheets for Obsidian",
   "main": "main.js",
   "type": "module",

@@ -1,6 +1,7 @@
 import {
 	Menu,
 	Notice,
+	Platform,
 	Scope,
 	TFolder,
 	TextFileView,
@@ -92,9 +93,6 @@ import {
 } from "./selection";
 
 export const VIEW_TYPE_DRAW = "quillstone-view";
-
-/** Après le passage d'un stylet, on ignore les contacts tactiles pendant ce délai (paume posée) — mais seulement un SEUL doigt à la fois, voir onPointerDown. */
-const PALM_REJECTION_MS = 2000;
 
 /**
  * Largeur/hauteur de contact (PointerEvent.width/height, en pixels CSS)
@@ -666,7 +664,15 @@ export class DrawView extends TextFileView {
 	private laserPoints: { x: number; y: number; t: number }[] = [];
 	private laserAnimHandle: number | null = null;
 	private activeRedrawScheduled = false;
-	private lastPenActiveAt = -Infinity;
+	/**
+	 * Devient vrai dès le premier contact au stylet de la session, et le reste
+	 * pour toujours (jamais réinitialisé par un délai) : à partir de là, un
+	 * doigt posé directement sur une feuille est présumé être la paume (voir
+	 * onPointerDown) — modèle repris de tldraw (son "isPenMode"), plus robuste
+	 * qu'une fenêtre de temps glissante (voir le bug signalé, plusieurs fois
+	 * non résolu avec l'ancienne approche).
+	 */
+	private penModeActive = false;
 	private ignoredPointerIds = new Set<number>();
 
 	/** Appui tactile immobile en cours, en vue d'ouvrir le menu contextuel (voir armLongPressMenu) — coordonnées écran, pas repère document : ce minuteur ne dessine rien, il ne fait que positionner un menu. */
@@ -4108,28 +4114,41 @@ export class DrawView extends TextFileView {
 		const isStylus = event.pointerType === "pen" || this.isStylusLikeTouch(event);
 
 		if (isStylus) {
-			this.lastPenActiveAt = performance.now();
+			// Premier contact du stylet de la session : à partir de maintenant,
+			// un doigt posé DIRECTEMENT SUR une feuille est présumé être la
+			// paume, EN PERMANENCE — jamais seulement pendant une fenêtre de
+			// quelques secondes après le dernier trait (l'ancienne approche par
+			// délai, voir le bug signalé : un doigt qui traînait pouvait encore
+			// bloquer le stylet suivant une fois la fenêtre écoulée, ou l'inverse).
+			// Modèle repris de tldraw (voir son "isPenMode"), qui n'a pas ce
+			// souci sur iPad. La zone noire hors des feuilles reste toujours
+			// utilisable au doigt pour défiler (voir plus bas) : y poser un
+			// doigt ne peut jamais être une paume qui se repose en écrivant.
+			this.penModeActive = true;
 			// Le stylet a toujours priorité sur un panoramique à un seul doigt en
 			// cours : ce doigt qui traîne encore au moment où le stylet retouche
-			// l'écran est presque toujours la paume qui se pose entre deux mots
-			// (voir le bug signalé — reposer la main pour continuer d'écrire
-			// bloquait le stylet jusqu'à ce qu'on relève cette paume), jamais un
-			// geste de navigation volontaire pendant qu'on dessine. Un pincement à
-			// deux doigts, lui, n'est jamais annulé ici (voir preemptStrayTouchPan).
+			// l'écran est presque toujours la paume qui se pose entre deux mots,
+			// jamais un geste de navigation volontaire pendant qu'on dessine. Un
+			// pincement à deux doigts, lui, n'est jamais annulé ici (voir
+			// preemptStrayTouchPan).
 			this.preemptStrayTouchPan();
 		}
 
-		if (event.pointerType === "touch" && !isStylus) {
-			// Rejet de la paume : un SEUL doigt après usage du stylet est ignoré.
-			// Plusieurs doigts simultanés (pincement/panoramique) restent
-			// acceptés même juste après avoir écrit au stylet — la paume pose un
-			// seul contact, un geste de navigation volontaire en pose deux.
-			const alreadyHasTouch = this.countActiveTouches() > 0;
-			if (!alreadyHasTouch && performance.now() - this.lastPenActiveAt < PALM_REJECTION_MS) {
-				this.debugLog("PALM-IGNORE", event); // DIAGNOSTIC TEMPORAIRE
-				this.ignoredPointerIds.add(event.pointerId);
-				return;
-			}
+		// Calculé une seule fois, réutilisé pour le rejet de paume ci-dessous et
+		// pour démarrer le panoramique plus bas (voir startedOffSheet).
+		const touchOnSheet =
+			event.pointerType === "touch" && !isStylus
+				? this.hitPage(...this.eventToXY(event, this.committedCanvas.getBoundingClientRect())) !== null
+				: false;
+
+		if (event.pointerType === "touch" && !isStylus && this.penModeActive && touchOnSheet) {
+			// Paume présumée (voir plus haut) : un doigt posé directement sur une
+			// feuille alors que le stylet a déjà servi dans cette session n'est
+			// jamais un geste volontaire — ignoré en permanence, jamais
+			// seulement pendant une fenêtre de temps.
+			this.debugLog("PALM-IGNORE", event); // DIAGNOSTIC TEMPORAIRE
+			this.ignoredPointerIds.add(event.pointerId);
+			return;
 		}
 
 		this.committedCanvas.setPointerCapture(event.pointerId);
@@ -4164,9 +4183,10 @@ export class DrawView extends TextFileView {
 			// prévisible pendant qu'on regarde son contenu de près. Le pincement à
 			// deux doigts, lui, reste géré plus haut et fonctionne n'importe où.
 			// (Un contact "touch" qui ressemble à un stylet tombe ici en faux :
-			// il continue plus bas, exactement comme "pen".)
-			const [touchDocX, touchDocY] = this.eventToXY(event, this.committedCanvas.getBoundingClientRect());
-			const startedOffSheet = this.hitPage(touchDocX, touchDocY) === null;
+			// il continue plus bas, exactement comme "pen". Un doigt qui aurait
+			// dû être ignoré comme une paume — sur la feuille, stylet déjà
+			// utilisé — a déjà été intercepté plus haut, avant ce bloc.)
+			const startedOffSheet = !touchOnSheet;
 
 			// Le menu contextuel par appui long reste disponible : on l'arme ici
 			// comme avant, il s'ouvrira si le doigt reste immobile assez
@@ -4356,7 +4376,12 @@ export class DrawView extends TextFileView {
 
 		if (event.pointerId !== this.activePointerId) return;
 
-		const coalesced = event.getCoalescedEvents?.() ?? [];
+		// getCoalescedEvents() est connu pour être peu fiable sur iOS (voir par
+		// exemple tldraw, qui le désactive explicitement sur cette plateforme) :
+		// on l'évite donc entièrement dans l'app iOS d'Obsidian plutôt que de
+		// risquer des points rejoués, dupliqués ou dans le désordre pendant un
+		// trait — voir le bug signalé (stylet qui semble se bloquer).
+		const coalesced = Platform.isIosApp ? [] : event.getCoalescedEvents?.() ?? [];
 		const source = coalesced.length > 0 ? coalesced : [event];
 
 		if (this.plugin.settings.tool === "laser") {
