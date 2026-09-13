@@ -2489,9 +2489,18 @@ export class DrawView extends TextFileView {
 		const h = typeof event.height === "number" ? event.height.toFixed(1) : "?";
 		const p = typeof event.pressure === "number" ? event.pressure.toFixed(2) : "?";
 		const line = `+${delta}ms ${tag} type=${event.pointerType} id=${event.pointerId} w=${w} h=${h} p=${p}`;
+		this.pushDebugLine(line);
+	}
+
+	/** Comme debugLog, mais pour une ligne de texte libre (pas d'événement pointeur) — voir son unique appelant, qui rapporte le nombre de points accumulés dans le trait au moment du relâchement. */
+	private debugLogText(text: string): void {
+		this.pushDebugLine(text);
+	}
+
+	private pushDebugLine(line: string): void {
 		this.debugLogLines.push(line);
-		if (this.debugLogLines.length > 14) this.debugLogLines.shift();
-		this.debugLogEl.setText(this.debugLogLines.join("\n"));
+		if (this.debugLogLines.length > 30) this.debugLogLines.shift();
+		if (this.debugLogEl) this.debugLogEl.setText(this.debugLogLines.join("\n"));
 	}
 
 	private countActiveTouches(): number {
@@ -4525,6 +4534,13 @@ export class DrawView extends TextFileView {
 				const [rawX, rawY] = this.toPageLocal(pageIndex, docX, docY);
 				this.activeStroke.points.push(this.clampPointToPage(pageIndex, [rawX, rawY, event.pressure]));
 			}
+			// DIAGNOSTIC TEMPORAIRE — voir debugLog : combien de points le trait
+			// a-t-il accumulés avant d'être commis ? Un trait "raté" avec un seul
+			// point (jamais de pointermove reçu entre down et up) se comporterait
+			// différemment d'un trait normal correctement rejeté ailleurs.
+			this.debugLogText(
+				`  -> finishStroke points=${this.activeStroke.points.length} page=${pageIndex} tool=${this.activeStroke.tool} color=${this.activeStroke.color} paper=${this.currentColors().paper} size=${this.activeStroke.size}`
+			);
 			this.finishStroke();
 			return;
 		}
