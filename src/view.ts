@@ -1309,6 +1309,22 @@ export class DrawView extends TextFileView {
 		this.committedCanvas.addEventListener("pointerup", this.onPointerUp);
 		this.committedCanvas.addEventListener("pointercancel", this.onPointerCancel);
 		this.committedCanvas.addEventListener("pointerleave", this.onPointerLeave);
+		// Bug documenté de Safari/WKWebView sur iPad (iOS 14+) : sa fonction
+		// "Scribble" peut intercepter silencieusement des PointerEvent du
+		// stylet, surtout lors de contacts rapprochés — voir le bug signalé
+		// ("j'essaie de dessiner juste après avoir levé le stylo, rien ne se
+		// passe, même pas dans les journaux", preuve que l'événement n'atteint
+		// jamais notre code). Le contournement connu, contre-intuitif mais
+		// documenté par d'autres (tldraw fait de même dans son propre canevas),
+		// est d'écouter aussi les événements Touch natifs — un système
+		// entièrement séparé des PointerEvent — et d'y appeler preventDefault(),
+		// ce qui empêche Scribble de s'approprier le geste en premier lieu.
+		// {passive:false} est indispensable : preventDefault() sur un
+		// écouteur passif ne fait rien.
+		this.committedCanvas.addEventListener("touchstart", this.onNativeTouchEvent, { passive: false });
+		this.committedCanvas.addEventListener("touchmove", this.onNativeTouchEvent, { passive: false });
+		this.committedCanvas.addEventListener("touchend", this.onNativeTouchEvent, { passive: false });
+		this.committedCanvas.addEventListener("touchcancel", this.onNativeTouchEvent, { passive: false });
 		// Sur contentEl (pas committedCanvas) : la molette zoome/panoramique
 		// aussi quand le pointeur survole la barre d'outils, au-dessus du
 		// canevas — pas seulement la feuille elle-même. onWheel calcule son
@@ -1349,6 +1365,10 @@ export class DrawView extends TextFileView {
 		this.committedCanvas?.removeEventListener("pointerup", this.onPointerUp);
 		this.committedCanvas?.removeEventListener("pointercancel", this.onPointerCancel);
 		this.committedCanvas?.removeEventListener("pointerleave", this.onPointerLeave);
+		this.committedCanvas?.removeEventListener("touchstart", this.onNativeTouchEvent);
+		this.committedCanvas?.removeEventListener("touchmove", this.onNativeTouchEvent);
+		this.committedCanvas?.removeEventListener("touchend", this.onNativeTouchEvent);
+		this.committedCanvas?.removeEventListener("touchcancel", this.onNativeTouchEvent);
 		this.contentEl.removeEventListener("wheel", this.onWheel);
 		this.committedCanvas?.removeEventListener("contextmenu", this.onContextMenu);
 		window.removeEventListener("keydown", this.onWindowKeyDown);
@@ -4655,6 +4675,19 @@ export class DrawView extends TextFileView {
 			this.scheduleViewportRedraw();
 		}
 		if (changed) this.scheduleActiveRedraw();
+	};
+
+	/**
+	 * N'existe que pour appeler preventDefault() sur l'événement Touch natif
+	 * (voir son branchement dans onOpen/onClose) — jamais de logique de
+	 * dessin ici, celle-ci reste entièrement dans les gestionnaires
+	 * PointerEvent (onPointerDown & Cie), un système séparé. Contournement
+	 * d'un bug documenté de Safari/WKWebView sur iPad où "Scribble" peut
+	 * intercepter silencieusement des PointerEvent du stylet sans laisser
+	 * passer même un pointerdown — voir le bug signalé.
+	 */
+	private onNativeTouchEvent = (event: TouchEvent): void => {
+		event.preventDefault();
 	};
 
 	/**
