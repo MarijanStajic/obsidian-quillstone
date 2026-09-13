@@ -547,6 +547,20 @@
 	user-select: none;
 }
 
+/*
+ * Sur un écran tactile (iPad...), il n'existe pas d'état :hover pour révéler
+ * ces contrôles : ils resteraient scellés à leur opacité repliée pour
+ * toujours, invisibles jusqu'à ce qu'on les touche à l'aveugle. On les affiche
+ * donc d'emblée à pleine opacité dès qu'aucun pointeur ne peut survoler (voir
+ * le bug signalé : boutons de dépliage/pagination illisibles sur iPad).
+ */
+@media (hover: none) {
+	.quillstone-embed-toggle,
+	.quillstone-embed-pager {
+		opacity: 0.85;
+	}
+}
+
 .quillstone-embed-missing,
 .quillstone-embed-error {
 	display: block;

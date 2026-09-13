@@ -75,6 +75,10 @@ export default class QuillStonePlugin extends Plugin {
 		this.addCommand({
 			id: "insert-drawing",
 			name: "Insert a drawing sheet",
+			// Sans icône, Obsidian retombe sur un point d'interrogation générique
+			// dès qu'on ajoute cette commande aux actions rapides (barre d'outils
+			// mobile) — voir le bug signalé.
+			icon: "file-plus",
 			editorCallback: (editor: Editor, ctx: MarkdownView | MarkdownFileInfo) => {
 				void this.insertDrawing(editor, ctx.file ?? null);
 			},
@@ -108,6 +112,10 @@ export default class QuillStonePlugin extends Plugin {
 		this.addCommand({
 			id: "import-pdf-drawing",
 			name: "Import a PDF as a drawing sheet",
+			// Même raison que pour "insert-drawing" ci-dessus : sans icône
+			// explicite, une action rapide ajoutée pour cette commande affiche un
+			// point d'interrogation générique.
+			icon: "file-input",
 			callback: () => void this.importPdfAsDrawing(null),
 		});
 

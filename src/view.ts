@@ -102,9 +102,6 @@ const HIGHLIGHTER_SIZE_MULTIPLIER = 3;
 /** `size` (2/4/8, les trois épaisseurs de la barre d'outils) devient un rayon de gomme utilisable. */
 const ERASER_RADIUS_SCALE = 5;
 
-/** Ramer-Douglas-Peucker appliqué au trait terminé (voir finishStroke) : tolérance en pixels logiques de la page. */
-const SIMPLIFY_TOLERANCE = 0.5;
-
 /** Marge ajoutée à la boîte englobante d'un trait effacé pour couvrir son épaisseur rendue (la boîte ne suit que les points, pas le lineWidth). */
 const ERASE_DIRTY_PADDING = 6;
 
@@ -1510,16 +1507,18 @@ export class DrawView extends TextFileView {
 	}
 
 	/**
-	 * Redessin régional pendant un geste de gomme sur `pageIndex` : ne
-	 * régénère que la zone accumulée depuis le dernier flush (fond + traits
-	 * qui la recoupent) DANS le cache de CETTE page, jamais toute la page.
-	 * La régénération complète n'a lieu qu'au pointerup (voir
-	 * finishEraseZone/finishEraseStroke, qui appellent render() directement).
+	 * Accumule `bounds` (agrandi de `pad`) dans rt.dirtyBounds pour `pageIndex` :
+	 * la prochaine flushCommittedRedraw() ne retracera que cette zone (fond +
+	 * traits qui la recoupent) DANS le cache de cette page, jamais toute la
+	 * page. Utilisé aussi bien pendant un geste de gomme (voir
+	 * markErasedRegion) qu'à la fin d'un trait/forme fraîchement dessiné (voir
+	 * finishStroke/finishShape) — un plein render() régénérerait tout le cache
+	 * à chaque geste, ce qui devient perceptible (latence stylet) dès qu'une
+	 * page contient beaucoup de traits.
 	 */
-	private markErasedRegion(pageIndex: number, bounds: StrokeBounds, strokeSize: number): void {
+	private markDirtyRegion(pageIndex: number, bounds: StrokeBounds, pad: number): void {
 		const rt = this.pages[pageIndex];
 		if (!rt) return;
-		const pad = strokeSize + ERASE_DIRTY_PADDING;
 		const padded: StrokeBounds = {
 			minX: bounds.minX - pad,
 			minY: bounds.minY - pad,
@@ -1534,6 +1533,11 @@ export class DrawView extends TextFileView {
 					maxY: Math.max(rt.dirtyBounds.maxY, padded.maxY),
 			  }
 			: padded;
+	}
+
+	/** Cas particulier de markDirtyRegion pour un geste de gomme : ajoute le padding de bord ERASE_DIRTY_PADDING, propre à la gomme (marge de sécurité autour du cercle de gomme, pas seulement du trait touché). */
+	private markErasedRegion(pageIndex: number, bounds: StrokeBounds, strokeSize: number): void {
+		this.markDirtyRegion(pageIndex, bounds, strokeSize + ERASE_DIRTY_PADDING);
 	}
 
 	private flushCommittedRedraw(pageIndex: number): void {
@@ -3852,6 +3856,22 @@ export class DrawView extends TextFileView {
 
 		if (this.viewportGesture) return; // un panoramique/pincement est déjà en cours
 
+		if (event.pointerType === "touch") {
+			// Le doigt ne dessine, ne sélectionne ni n'efface jamais : seuls le
+			// stylet et la souris interagissent avec le contenu. Un seul doigt
+			// fait toujours défiler la page (comme un geste à deux doigts
+			// auparavant, voir le bug signalé — on devait maintenir deux doigts
+			// pour naviguer) ; le pincement à deux doigts reste géré plus haut.
+			// Le menu contextuel par appui long reste disponible : on l'arme ici
+			// comme avant, il s'ouvrira si le doigt reste immobile assez
+			// longtemps plutôt que de glisser en panoramique (voir
+			// updateLongPressMenu, appelé aussi pendant un panoramique).
+			event.preventDefault();
+			this.armLongPressMenu(event.clientX, event.clientY);
+			this.startPanGesture(event);
+			return;
+		}
+
 		if (this.isPanTrigger(event)) {
 			event.preventDefault();
 			this.startPanGesture(event);
@@ -3879,10 +3899,10 @@ export class DrawView extends TextFileView {
 
 		// L'outil main ne dessine ni ne sélectionne jamais : un clic gauche
 		// panoramique déjà (voir isPanTrigger, plus haut dans cette méthode) ;
-		// tout AUTRE bouton (droit, ou tactile puisque isPanTrigger ignore le
-		// tactile) atterrit ici et ne doit rien déclencher du tout, plutôt que
-		// de retomber sur le comportement par défaut du stylo tout en bas de
-		// cette méthode.
+		// tout AUTRE bouton (droit — le tactile est déjà intercepté plus haut,
+		// il ne dessine jamais) atterrit ici et ne doit rien déclencher du tout,
+		// plutôt que de retomber sur le comportement par défaut du stylo tout en
+		// bas de cette méthode.
 		if (tool === "hand") return;
 
 		const pageIndex = this.hitPage(docX, docY);
@@ -3895,13 +3915,6 @@ export class DrawView extends TextFileView {
 		event.preventDefault();
 		this.activePointerId = event.pointerId;
 		this.focusedPageIndex = pageIndex;
-
-		// Sur tablette, un appui immobile assez long ouvre le menu contextuel
-		// (voir triggerLongPressMenu) — quel que soit l'outil actif, y compris
-		// la gomme. Coordonnées écran : ce minuteur ne dessine rien.
-		if (event.pointerType === "touch") {
-			this.armLongPressMenu(event.clientX, event.clientY);
-		}
 
 		const [x, y] = this.toPageLocal(pageIndex, docX, docY);
 
@@ -4009,6 +4022,11 @@ export class DrawView extends TextFileView {
 		}
 
 		if (this.viewportGesture) {
+			// Un panoramique à un doigt reste candidat au menu contextuel tant que
+			// le doigt n'a pas assez bougé (voir onPointerDown, qui l'arme dès le
+			// pointerdown) : sans cet appel ici, updateLongPressMenu ne serait
+			// jamais atteint pendant un panoramique (on retourne juste après).
+			if (event.pointerType === "touch") this.updateLongPressMenu(event.clientX, event.clientY);
 			this.updateViewportGesture(event);
 			return;
 		}
@@ -4025,8 +4043,6 @@ export class DrawView extends TextFileView {
 		}
 
 		if (event.pointerId !== this.activePointerId) return;
-
-		if (event.pointerType === "touch") this.updateLongPressMenu(event.clientX, event.clientY);
 
 		const coalesced = event.getCoalescedEvents?.() ?? [];
 		const source = coalesced.length > 0 ? coalesced : [event];
@@ -4296,25 +4312,52 @@ export class DrawView extends TextFileView {
 	};
 
 	/**
-	 * Termine le trait : simplifie ses points (Ramer-Douglas-Peucker, voir
-	 * simplify.ts — une capture haute fréquence contient beaucoup de points
-	 * redondants, quasi alignés), l'enregistre dans l'historique, redessine
-	 * le canvas validé depuis le modèle, puis sauvegarde. La simplification
-	 * change légèrement la forme (de moins de SIMPLIFY_TOLERANCE px), donc le
-	 * dernier trait affiché en direct n'est pas pixel pour pixel identique au
-	 * rendu final, mais la différence est sous le seuil visible.
+	 * Termine le trait : tente une dernière reconnaissance de forme si le
+	 * maintien immobile ne l'a pas déjà fait (voir plus bas), enregistre le
+	 * résultat dans l'historique, ne redessine QUE la zone couverte par ce
+	 * trait dans le cache de la page (voir markDirtyRegion/flushCommittedRedraw
+	 * — jamais render(), qui retracerait toute la page à chaque trait et
+	 * introduit une latence perceptible dès qu'une page contient beaucoup de
+	 * contenu), puis sauvegarde. Le trait est conservé pixel pour pixel tel
+	 * que tracé à l'écran : aucune simplification a posteriori qui en
+	 * changerait la forme.
 	 */
 	private finishStroke(): void {
 		const stroke = this.activeStroke;
 		const pageIndex = this.activeStrokePageIndex;
 		const wasStraightened = this.straightLine !== null;
-		const recognized = this.recognizedShape;
+		let recognized = this.recognizedShape;
 		this.activePointerId = null;
 		this.activeStroke = null;
 		this.activeStrokePageIndex = null;
 		this.resetStraightLineState();
 		this.clearActiveCanvasFull();
 		if (!stroke || pageIndex === null) return;
+
+		// Le maintien immobile (triggerHoldConversion) ne reconnaît une forme
+		// que si l'utilisateur marque une pause avant de relever le stylet — un
+		// geste rare quand on dessine un rond ou un rectangle d'un seul trait
+		// rapide. On retente donc la même reconnaissance ici, au relâchement,
+		// indépendamment du réglage straightenOnHold (qui, d'après son propre
+		// intitulé dans les réglages, ne concerne que la conversion en ligne
+		// droite, pas la reconnaissance de forme).
+		if (!recognized && !wasStraightened) {
+			const candidate = this.recognizeClosedShape(stroke.points);
+			if (candidate) {
+				recognized = {
+					id: stroke.id,
+					type: "shape",
+					shape: candidate.shape,
+					x: candidate.x,
+					y: candidate.y,
+					width: candidate.width,
+					height: candidate.height,
+					rotation: 0,
+					color: stroke.color,
+					size: stroke.size,
+				};
+			}
+		}
 
 		if (recognized) {
 			// Le tracé au stylo/surligneur d'origine est entièrement remplacé par
@@ -4324,7 +4367,8 @@ export class DrawView extends TextFileView {
 			this.history.push(pageIndex, { type: "addShape", element: recognized });
 			this.updateHistoryButtons();
 			this.requestSave();
-			this.render(pageIndex);
+			this.markDirtyRegion(pageIndex, computeElementBounds(recognized), recognized.size);
+			this.flushCommittedRedraw(pageIndex);
 
 			// Même geste qu'une forme tracée avec la palette (voir finishShape) :
 			// passe tout de suite en mode sélection, déjà sélectionnée, pour
@@ -4340,19 +4384,13 @@ export class DrawView extends TextFileView {
 			return;
 		}
 
-		// Un segment droit est déjà exactement 2 points (origine, extrémité) :
-		// rien à simplifier, et la simplification RDP ne changerait rien à un
-		// segment de toute façon (voir simplify.ts, points.length <= 2).
-		if (!wasStraightened) {
-			stroke.points = simplifyPoints(stroke.points, SIMPLIFY_TOLERANCE);
-		}
-
 		const page = this.pages[pageIndex].page;
 		page.elements.push(stroke);
 		this.history.push(pageIndex, { type: "add", stroke });
 		this.updateHistoryButtons();
 		this.requestSave();
-		this.render(pageIndex);
+		this.markDirtyRegion(pageIndex, strokeBounds(stroke), stroke.size);
+		this.flushCommittedRedraw(pageIndex);
 	}
 
 	// --- Palette de formes prédéfinies -------------------------------------------
@@ -4456,7 +4494,8 @@ export class DrawView extends TextFileView {
 		this.history.push(pageIndex, { type: "addShape", element: shape });
 		this.updateHistoryButtons();
 		this.requestSave();
-		this.render(pageIndex);
+		this.markDirtyRegion(pageIndex, computeElementBounds(shape), shape.size);
+		this.flushCommittedRedraw(pageIndex);
 
 		// Une forme fraîchement tracée passe tout de suite en mode sélection,
 		// déjà sélectionnée : le geste naturel juste après un rectangle/rond/

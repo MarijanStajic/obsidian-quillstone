@@ -310,7 +310,16 @@ export class DrawPreviewManager {
 		cropEl.appendChild(canvas);
 		cropEl.setCssStyles({ maxHeight: `${this.stepHeightPx(step, cropEl, canvas)}px` });
 
-		const toggleBtn = hostEl.createEl("button", { cls: "quillstone-embed-toggle", attr: { type: "button" } });
+		// "clickable-icon" en plus de la classe de positionnement : c'est la
+		// classe standard qu'Obsidian utilise pour toute icône cliquable de son
+		// interface (voir la barre d'outils principale, view.ts), qui dimensionne
+		// et colore l'icône de façon fiable sur toutes les plateformes — sans
+		// elle, l'icône Lucide de ce bouton entièrement personnalisé s'affichait
+		// comme un bloc opaque plutôt qu'un chevron sur iPad (voir le bug signalé).
+		const toggleBtn = hostEl.createEl("button", {
+			cls: "quillstone-embed-toggle clickable-icon",
+			attr: { type: "button" },
+		});
 		this.syncToggleButton(toggleBtn, step);
 
 		// Si la feuille entière tient déjà dans la hauteur repliée (page très
@@ -372,7 +381,13 @@ export class DrawPreviewManager {
 	): void {
 		const pagerEl = hostEl.createDiv({ cls: "quillstone-embed-pager" });
 
-		const firstBtn = pagerEl.createEl("button", { cls: "quillstone-embed-page-btn", attr: { type: "button" } });
+		// "clickable-icon" pour la même raison que le bouton de dépliage ci-dessus
+		// (voir buildEmbedDom) : rendu fiable de l'icône Lucide sur toutes les
+		// plateformes, y compris iPad.
+		const firstBtn = pagerEl.createEl("button", {
+			cls: "quillstone-embed-page-btn clickable-icon",
+			attr: { type: "button" },
+		});
 		setIcon(firstBtn, "chevron-first");
 		firstBtn.setAttribute("aria-label", "Back to first page");
 		setTooltip(firstBtn, "Back to first page");
@@ -380,7 +395,10 @@ export class DrawPreviewManager {
 		const label = pagerEl.createDiv({ cls: "quillstone-embed-page-label" });
 		label.setText(`${pageIndex + 1}/${totalPages}`);
 
-		const nextBtn = pagerEl.createEl("button", { cls: "quillstone-embed-page-btn", attr: { type: "button" } });
+		const nextBtn = pagerEl.createEl("button", {
+			cls: "quillstone-embed-page-btn clickable-icon",
+			attr: { type: "button" },
+		});
 		setIcon(nextBtn, "chevron-right");
 		nextBtn.setAttribute("aria-label", "Next page");
 		setTooltip(nextBtn, "Next page");
