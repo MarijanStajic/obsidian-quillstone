@@ -96,6 +96,20 @@ export const VIEW_TYPE_DRAW = "quillstone-view";
 /** Après le passage d'un stylet, on ignore les contacts tactiles pendant ce délai (paume posée) — mais seulement un SEUL doigt à la fois, voir onPointerDown. */
 const PALM_REJECTION_MS = 2000;
 
+/**
+ * Largeur/hauteur de contact (PointerEvent.width/height, en pixels CSS)
+ * en dessous de laquelle un événement classé "touch" est traité comme un
+ * stylet malgré tout (voir isStylusLikeTouch) — un doigt ou une paume posent
+ * un contact large (typiquement 15-40px), alors qu'une pointe de stylet en
+ * pose un minuscule (proche de 0), même sur les WebView qui le classent à
+ * tort en "touch" (bug documenté d'iOS/WKWebView avec l'Apple Pencil,
+ * surtout lors d'un contact rapproché du précédent) — voir le bug signalé :
+ * sans cette distinction, un tel contact mal classé se faisait purement et
+ * simplement ignorer par le rejet de paume ci-dessous, l'écriture entière de
+ * ce geste disparaissant silencieusement.
+ */
+const STYLUS_LIKE_CONTACT_MAX_PX = 10;
+
 /** Le surligneur est délibérément plus épais que le stylo pour la même épaisseur choisie. */
 const HIGHLIGHTER_SIZE_MULTIPLIER = 3;
 
@@ -2214,6 +2228,20 @@ export class DrawView extends TextFileView {
 				  // les deux bornes se croisent, le centrer plutôt que de choisir
 				  // arbitrairement laquelle respecter.
 				  (minOffsetY + maxOffsetY) / 2;
+
+		// Même chose horizontalement (voir documentWidth, layoutPages) : sans
+		// cette borne, un panoramique à un doigt ou par inertie (voir
+		// startMomentumScroll) pouvait faire dériver la vue horizontalement à
+		// l'infini, jusqu'à quitter complètement la feuille (voir le bug
+		// signalé). Le contenu document va toujours de 0 à documentWidth,
+		// contrairement à l'axe vertical qui part d'originY de la première page.
+		const contentLeft = 0;
+		const contentRight = this.documentWidth * scale;
+		const maxOffsetX = margin - contentLeft;
+		const minOffsetX = rect.width - margin - contentRight;
+
+		this.viewport.offsetX =
+			minOffsetX <= maxOffsetX ? clamp(this.viewport.offsetX, minOffsetX, maxOffsetX) : (minOffsetX + maxOffsetX) / 2;
 	}
 
 	/** Marque toutes les pages à régénérer une fois le geste de zoom stabilisé — leur régénération réelle reste paresseuse (voir redrawViewport, appelé juste après) : seules les pages visibles à ce moment-là sont retracées tout de suite. */
@@ -2395,10 +2423,33 @@ export class DrawView extends TextFileView {
 		return false;
 	}
 
+	/**
+	 * Vrai si `event` doit être traité comme un stylet malgré un
+	 * `pointerType` "touch" : un contact minuscule (voir
+	 * STYLUS_LIKE_CONTACT_MAX_PX), incompatible avec un doigt ou une paume,
+	 * bien plus larges. Couvre le cas où le WebView classe à tort l'Apple
+	 * Pencil en "touch" — sans quoi ce contact tombait dans le rejet de paume
+	 * ou le panoramique à un doigt, et l'écriture correspondante disparaissait
+	 * entièrement (voir le bug signalé). Toujours faux pour un `pointerType`
+	 * "pen" en entrée : ce cas est déjà un stylet sans ambiguïté, inutile de
+	 * passer par ce test (voir les appelants, qui vérifient `pointerType`
+	 * séparément).
+	 */
+	private isStylusLikeTouch(event: PointerEvent): boolean {
+		if (event.pointerType !== "touch") return false;
+		// event.width/height valent 1 par défaut quand l'appareil ne rapporte
+		// pas de géométrie de contact (voir la spec Pointer Events) — un doigt
+		// ou une paume qui en rapportent une vraie sont presque toujours bien
+		// plus larges que ça, donc l'absence de valeur (0/undefined) ou une
+		// valeur minuscule comptent toutes deux comme "ressemble à un stylet".
+		const contactSize = Math.max(event.width || 0, event.height || 0);
+		return contactSize <= STYLUS_LIKE_CONTACT_MAX_PX;
+	}
+
 	private countActiveTouches(): number {
 		let count = 0;
 		for (const [id, e] of this.pointers) {
-			if (e.pointerType === "touch" && !this.ignoredPointerIds.has(id)) count++;
+			if (e.pointerType === "touch" && !this.isStylusLikeTouch(e) && !this.ignoredPointerIds.has(id)) count++;
 		}
 		return count;
 	}
@@ -2665,7 +2716,7 @@ export class DrawView extends TextFileView {
 		this.cancelActiveDrawOrErase();
 
 		const touchIds = [...this.pointers.entries()]
-			.filter(([id, e]) => e.pointerType === "touch" && !this.ignoredPointerIds.has(id))
+			.filter(([id, e]) => e.pointerType === "touch" && !this.isStylusLikeTouch(e) && !this.ignoredPointerIds.has(id))
 			.map(([id]) => id);
 		if (touchIds.length < 2) return;
 		const [idA, idB] = touchIds;
@@ -3990,7 +4041,14 @@ export class DrawView extends TextFileView {
 			this.contentEl.focus();
 		}
 
-		if (event.pointerType === "pen") {
+		// Un stylet mal classé "touch" par le WebView (voir isStylusLikeTouch)
+		// doit être traité EXACTEMENT comme "pen" ci-dessous : sans ça, il
+		// tombait dans le rejet de paume ou le panoramique à un doigt plus bas,
+		// et l'écriture correspondante disparaissait entièrement en silence —
+		// voir le bug signalé ("je repose le stylet et ça n'écrit pas").
+		const isStylus = event.pointerType === "pen" || this.isStylusLikeTouch(event);
+
+		if (isStylus) {
 			this.lastPenActiveAt = performance.now();
 			// Le stylet a toujours priorité sur un panoramique à un seul doigt en
 			// cours : ce doigt qui traîne encore au moment où le stylet retouche
@@ -4002,7 +4060,7 @@ export class DrawView extends TextFileView {
 			this.preemptStrayTouchPan();
 		}
 
-		if (event.pointerType === "touch") {
+		if (event.pointerType === "touch" && !isStylus) {
 			// Rejet de la paume : un SEUL doigt après usage du stylet est ignoré.
 			// Plusieurs doigts simultanés (pincement/panoramique) restent
 			// acceptés même juste après avoir écrit au stylet — la paume pose un
@@ -4028,7 +4086,7 @@ export class DrawView extends TextFileView {
 
 		if (this.viewportGesture) return; // un panoramique/pincement est déjà en cours
 
-		if (event.pointerType === "touch") {
+		if (event.pointerType === "touch" && !isStylus) {
 			// Le doigt ne dessine, ne sélectionne ni n'efface jamais : seuls le
 			// stylet et la souris interagissent avec le contenu. Un seul doigt
 			// fait toujours défiler la page, feuille comprise (glisser-déposer
@@ -4038,6 +4096,8 @@ export class DrawView extends TextFileView {
 			// feuille, le défilement s'arrête net dès qu'on lâche, pour rester
 			// prévisible pendant qu'on regarde son contenu de près. Le pincement à
 			// deux doigts, lui, reste géré plus haut et fonctionne n'importe où.
+			// (Un contact "touch" qui ressemble à un stylet tombe ici en faux :
+			// il continue plus bas, exactement comme "pen".)
 			const [touchDocX, touchDocY] = this.eventToXY(event, this.committedCanvas.getBoundingClientRect());
 			const startedOffSheet = this.hitPage(touchDocX, touchDocY) === null;
 
