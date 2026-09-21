@@ -27,6 +27,8 @@ import {
 	ShapeKind,
 	Stroke,
 	StrokeElement,
+	TextAlign,
+	TextElement,
 	createEmptyDrawing,
 	createEmptyPage,
 	matchPaperFormat,
@@ -45,9 +47,14 @@ import {
 	distanceToSegment,
 	drawElement,
 	eraseZone,
+	measureTextBoxSize,
+	measureTextHeight,
 	renderScene,
 	strokeBounds,
 	strokeHitTest,
+	TEXT_LINE_HEIGHT_RATIO,
+	TEXT_PADDING_PX,
+	textFontSize,
 } from "./render";
 import {
 	History,
@@ -118,6 +125,20 @@ const ERASER_RADIUS_SCALE = 5;
 const ERASE_DIRTY_PADDING = 6;
 
 const SIZES = [2, 4, 8];
+
+const TEXT_ALIGNS: TextAlign[] = ["left", "center", "right", "justify"];
+const TEXT_ALIGN_ICONS: Record<TextAlign, string> = {
+	left: "align-left",
+	center: "align-center",
+	right: "align-right",
+	justify: "align-justify",
+};
+const TEXT_ALIGN_LABELS: Record<TextAlign, string> = {
+	left: "Align left",
+	center: "Align center",
+	right: "Align right",
+	justify: "Justify",
+};
 
 /** Durée d'appui maintenu sur une pastille de palette pour ouvrir le sélecteur de remplacement (voir replacePaletteSwatch). Le clic droit ouvre le même sélecteur, instantanément. */
 const LONG_PRESS_MS = 500;
@@ -229,6 +250,7 @@ const CORNER_SIMPLIFY_RATIO = 0.09;
 const TOOLS: ActiveTool[] = [
 	"pen",
 	"highlighter",
+	"text",
 	"eraser-zone",
 	"eraser-stroke",
 	"hand",
@@ -236,6 +258,21 @@ const TOOLS: ActiveTool[] = [
 	"select",
 	"capture",
 ];
+
+/** Largeur par défaut (repère de page) d'une zone de texte fraîchement posée par un clic — voir startTextCreation. Ajustable ensuite comme n'importe quel élément, via les poignées de l'outil sélection. */
+const TEXT_DEFAULT_WIDTH = 220;
+/**
+ * En dessous (repère ÉCRAN/CSS, PAS repère de page — voir
+ * STRAIGHTEN_STILL_THRESHOLD_PX pour la même remarque ailleurs dans ce
+ * fichier), un glissement de l'outil texte est traité comme un simple clic.
+ * Volontairement en repère écran plutôt que page : un seuil en repère de
+ * page se fait amplifier par le dézoom (repère de page = repère écran /
+ * échelle) — sur une feuille entière ajustée à la fenêtre, le moindre
+ * tremblement de la main pendant un simple clic dépasserait sinon le seuil.
+ */
+const TEXT_DRAG_MIN_SCREEN_PX = 10;
+/** Largeur minimale (repère de page) d'une zone de texte créée par glissement — sans plancher, un glissement presque horizontal produirait une boîte trop étroite pour rester lisible ou même cliquable ensuite. */
+const TEXT_BOX_MIN_WIDTH_PX = 40;
 
 /** Palette de formes prédéfinies, dans son propre groupe de la barre d'outils (voir buildToolbar) — pas mêlée à TOOLS. Le carré et le rond n'ont pas leur propre outil : Maj maintenue pendant le tracé donne un rapport 1:1 à "rectangle"/"ellipse", exactement comme le redimensionnement d'une sélection ailleurs dans le plugin. */
 const SHAPE_TOOLS: ShapeKind[] = ["rectangle", "ellipse", "triangle", "line", "arrow"];
@@ -255,6 +292,7 @@ const TOOL_ICONS: Record<ActiveTool, string> = {
 	arrow: "arrow-up-right",
 	laser: "flashlight",
 	hand: "hand",
+	text: "type",
 };
 
 const TOOL_LABELS: Record<ActiveTool, string> = {
@@ -272,6 +310,28 @@ const TOOL_LABELS: Record<ActiveTool, string> = {
 	select: "Lasso",
 	capture: "Capture an area",
 	hand: "Hand (pan)",
+	text: "Text",
+};
+
+/**
+ * Raccourci clavier (une seule lettre, sans modificateur) de chaque outil qui
+ * en a un — voir son enregistrement dans onOpen. Pas un raccourci par outil
+ * de TOOLS/SHAPE_TOOLS : la capture, les formes prédéfinies et le laser n'en
+ * ont volontairement pas, pour rester un ajout ciblé plutôt qu'un raccourci
+ * pour absolument tout. "l" pour le lasso (Lasso), "m" pour le surligneur
+ * (Marqueur, son nom courant en français), "d" pour la gomme par trait entier
+ * ("suppression totale d'un coup") : aucun des trois n'a de convention
+ * établie ailleurs, contrairement à "h" (Main/Hand) ou "p"/"t"/"e"/"c".
+ */
+const TOOL_SHORTCUTS: Partial<Record<string, ActiveTool>> = {
+	p: "pen",
+	m: "highlighter",
+	t: "text",
+	e: "eraser-zone",
+	d: "eraser-stroke",
+	h: "hand",
+	c: "cursor",
+	l: "select",
 };
 
 // --- Outil sélection ---------------------------------------------------------
@@ -289,6 +349,11 @@ const LOCK_BADGE_RADIUS_PX = 7;
 const SELECTION_ROTATE_SNAP_DEG = 15;
 const SELECTION_NUDGE_PX = 1;
 const SELECTION_NUDGE_FAST_PX = 10;
+/** Pas de défilement (écran, indépendant du zoom — voir Viewport.offsetX/offsetY) d'un appui sur une flèche quand il n'y a rien à déplacer (voir handleSelectionNudgeKey) — Maj maintenue va plus vite, comme pour le déplacement d'une sélection. */
+const ARROW_SCROLL_STEP_PX = 60;
+const ARROW_SCROLL_STEP_FAST_PX = 240;
+/** Taille minimale (écran) du curseur de la barre de défilement verticale, même pour un très long document — sans plancher, il deviendrait un fil invisible et impossible à attraper (voir DrawView.scrollbarMetrics). */
+const SCROLLBAR_MIN_THUMB_PX = 24;
 /** Décalage (repère de la page) appliqué à un collage, pour qu'il ne tombe jamais exactement sur l'original. */
 const PASTE_OFFSET_PX = 16;
 const MARQUEE_DASH_SPEED_PX_PER_S = 24;
@@ -488,6 +553,37 @@ interface TransformSession {
 }
 
 /**
+ * Édition au clavier d'une zone de texte en cours — voir
+ * DrawView.startTextCreation (outil "text", nouvelle boîte) et
+ * startTextEditing (reclic avec l'outil texte, ou double-clic avec un autre
+ * outil, sur une boîte existante). `elementId`
+ * distingue les deux cas : `null` pour une création (l'élément n'existe pas
+ * encore dans `page.elements`, il n'y entre qu'à la validation — voir
+ * finishTextEditing), l'id réel pour l'édition d'un élément déjà présent
+ * (jamais muté en place pendant la frappe, seulement à la validation).
+ * `draft` porte position/couleur/taille/alignement/dimensions de départ, dans
+ * les deux cas — pour une création, c'est aussi le seul endroit où elles
+ * vivent tant que l'élément n'est pas encore ajouté ; la couleur et
+ * l'alignement y sont modifiés EN PLACE pendant l'édition (voir
+ * recolorSelection/setTextAlign, appelés aussi bien pour une sélection que
+ * pour cette session), jamais seulement lus.
+ */
+interface TextEditorSession {
+	ta: HTMLTextAreaElement;
+	pageIndex: number;
+	elementId: string | null;
+	draft: TextElement;
+	/**
+	 * Vrai seulement pour une création par simple CLIC (jamais pour un
+	 * glissement, ni pour l'édition d'une boîte existante) : à la validation,
+	 * la largeur ÉPOUSE le texte tapé, plafonnée à TEXT_DEFAULT_WIDTH (voir
+	 * measureTextBoxSize) — une largeur dessinée à la souris reste, elle,
+	 * fixée pour de bon (voir finishTextBoxCreation).
+	 */
+	autoFitWidth: boolean;
+}
+
+/**
  * État de vue et de rendu d'UNE page (voir DrawingPage, model.ts, pour son
  * contenu) : son propre cache hors écran (bitmap des traits validés, voir
  * strokesCacheCanvas dans l'ancienne version à page unique du plugin),
@@ -524,6 +620,8 @@ export class DrawView extends TextFileView {
 	private pages: PageRuntime[] = [];
 	/** Largeur totale du document en repère document (la plus large des pages) — voir layoutPages. */
 	private documentWidth = 1;
+	/** Hauteur totale de l'empilement de pages en repère document, PAGE_GAP final exclu — voir layoutPages. Sert à la barre de défilement verticale (voir updateScrollbar), jamais au rendu lui-même (chaque page connaît déjà sa propre originY). */
+	private documentHeight = 1;
 
 	private toolbarEl!: HTMLDivElement;
 	private colorsGroupEl!: HTMLDivElement;
@@ -551,6 +649,20 @@ export class DrawView extends TextFileView {
 	private pageDeleteBtn!: HTMLDivElement;
 	/** Bouton « Déplacer cette page » (voir promptMovePage) — même mécanisme que pageDeleteBtn : un seul élément repositionné sur la page survolée, juste au-dessus du bouton de suppression (voir updateHoverPageButtons). */
 	private pageMoveBtn!: HTMLDivElement;
+	/** Barre de défilement verticale custom (voir updateScrollbar) : masquée dès qu'il n'y a qu'une seule page ou que tout le document tient déjà dans le volet — le panoramique (molette, flèches, glisser) reste toujours possible sans elle, c'est un raccourci visuel en plus, jamais le seul moyen de défiler. */
+	private scrollbarTrackEl!: HTMLDivElement;
+	private scrollbarThumbEl!: HTMLDivElement;
+	/** Glissement du curseur de la barre en cours — voir onScrollbarThumbPointerDown. `null` hors glissement. */
+	private scrollbarDrag: {
+		pointerId: number;
+		startClientY: number;
+		startOffsetY: number;
+		/** Bornes courantes de Viewport.offsetY (voir clampViewportOffset) et hauteurs du rail/curseur en pixels écran, figées au pointerdown : recalculer à chaque frame de glissement introduirait une dérive si le contenu changeait entre-temps (même raison que TransformSession.snapshot). */
+		minOffsetY: number;
+		maxOffsetY: number;
+		trackHeight: number;
+		thumbHeight: number;
+	} | null = null;
 	/** Page sous le pointeur (souris/stylet, jamais le tactile — voir onPointerMove), pour positionner pageDeleteBtn ; `null` si le pointeur est hors de toute page ou qu'un geste est en cours. */
 	private hoveredPageIndex: number | null = null;
 	/**
@@ -588,6 +700,8 @@ export class DrawView extends TextFileView {
 	/** Le bouton lui-même EST la pastille de la couleur active (fond = entry.active) : son fond doit donc suivre l'aperçu en direct pendant un glissement dans le sélecteur, voir previewColorLive. */
 	private freePickerButtonEl: HTMLElement | null = null;
 	private sizeButtons = new Map<number, HTMLElement>();
+	private textAlignGroupEl!: HTMLDivElement;
+	private textAlignButtons = new Map<TextAlign, HTMLElement>();
 	/** Bouton unique ouvrant le menu des formes prédéfinies (voir openShapeMenu) — pas dans toolButtons comme les autres outils : son icône et son état actif suivent la forme active, tenus à jour à part dans syncToolbarState. */
 	private shapesMenuBtn!: HTMLElement;
 	private undoBtn!: HTMLElement;
@@ -607,6 +721,13 @@ export class DrawView extends TextFileView {
 	private activeShapePageIndex: number | null = null;
 	/** Point de départ du glissement (repère de activeShapePageIndex), fixe pour toute la durée du geste — sert d'ancre à updateActiveShape pour recalculer x/y/width/height à chaque mouvement, jamais accumulé de façon incrémentale (même raison que TransformSession.snapshot : éviter toute dérive d'arrondi). */
 	private activeShapeStart: [number, number] | null = null;
+	/** Édition en cours d'une zone de texte (voir TextEditorSession) — non nul dès que le textarea de saisie est affiché, jusqu'à sa validation ou son annulation (voir finishTextEditing). */
+	private textEditor: TextEditorSession | null = null;
+	/** Boîte de texte en cours de glissement avec l'outil "text" (voir updateActiveTextBox) — même principe qu'activeShape, mais seule sa LARGEUR survit à finishTextBoxCreation (voir sa doc) : la hauteur, elle, suit toujours le texte tapé. */
+	private activeTextBox: { x: number; y: number; width: number; height: number } | null = null;
+	private activeTextBoxPageIndex: number | null = null;
+	/** Point de départ du glissement (repère de activeTextBoxPageIndex) — même rôle qu'activeShapeStart. */
+	private activeTextBoxStart: [number, number] | null = null;
 	/**
 	 * Vrai juste après qu'une forme fraîchement créée (palette de formes, ou
 	 * reconnue automatiquement à main levée — voir finishShape/finishStroke)
@@ -825,12 +946,16 @@ export class DrawView extends TextFileView {
 			y += rt.page.height + PAGE_GAP;
 		}
 		this.documentWidth = maxWidth;
+		this.documentHeight = this.pages.length > 0 ? y - PAGE_GAP : 0;
 
 		// wrapper n'existe pas encore lors du tout premier rebuildPageRuntimes()
 		// d'onOpen() (appelé avant la construction du DOM, voir onOpen) : rien à
 		// synchroniser à ce moment-là, onOpen le fait lui-même juste après avoir
 		// créé le conteneur.
-		if (this.wrapper) this.syncAddPageButtons();
+		if (this.wrapper) {
+			this.syncAddPageButtons();
+			this.updateScrollbar();
+		}
 	}
 
 	/**
@@ -1177,17 +1302,33 @@ export class DrawView extends TextFileView {
 		this.rebuildPageRuntimes();
 
 		this.scope = new Scope(this.app.scope);
+		// Chaque raccourci ci-dessous se désarme devant une frappe ordinaire
+		// dans un champ de saisie (voir isTypingInField — le textarea d'une
+		// zone de texte, mais aussi le champ hexadécimal du sélecteur de
+		// couleur, ou tout futur champ) : Suppr/Retour arrière/Ctrl+C/Ctrl+X/
+		// Ctrl+A/Échap et les raccourcis d'outil à une lettre ci-dessous ont
+		// tous un sens ordinaire de saisie de texte dans un tel champ (effacer
+		// un caractère, copier le texte sélectionné, tout sélectionner...) —
+		// sans cette garde, ils agiraient à la place sur la sélection
+		// d'éléments du canevas ou changeraient d'outil à chaque lettre tapée,
+		// jamais sur ce qu'on est réellement en train de taper. Ne jamais
+		// appeler preventDefault() dans ce cas (juste `return` avant lui) :
+		// c'est ce qui laisse le comportement natif du champ se produire
+		// normalement.
 		this.scope.register(["Mod"], "z", (evt) => {
+			if (this.isTypingInField()) return;
 			evt.preventDefault();
 			this.undo();
 			return false;
 		});
 		this.scope.register(["Mod", "Shift"], "z", (evt) => {
+			if (this.isTypingInField()) return;
 			evt.preventDefault();
 			this.redo();
 			return false;
 		});
 		this.scope.register(["Mod"], "v", (evt) => {
+			if (this.isTypingInField()) return;
 			evt.preventDefault();
 			void this.pasteFromClipboard();
 			return false;
@@ -1197,43 +1338,43 @@ export class DrawView extends TextFileView {
 		// que si une sélection existe réellement — sinon on laisse le
 		// raccourci filer sans effet, plutôt que de le "consommer" pour rien.
 		this.scope.register([], "Delete", (evt) => {
-			if (this.selectedIds.size === 0) return;
+			if (this.isTypingInField() || this.selectedIds.size === 0) return;
 			evt.preventDefault();
 			this.deleteSelection();
 			return false;
 		});
 		this.scope.register([], "Backspace", (evt) => {
-			if (this.selectedIds.size === 0) return;
+			if (this.isTypingInField() || this.selectedIds.size === 0) return;
 			evt.preventDefault();
 			this.deleteSelection();
 			return false;
 		});
 		this.scope.register(["Mod"], "c", (evt) => {
-			if (this.selectedIds.size === 0) return;
+			if (this.isTypingInField() || this.selectedIds.size === 0) return;
 			evt.preventDefault();
 			this.copySelectionToClipboard();
 			return false;
 		});
 		this.scope.register(["Mod"], "x", (evt) => {
-			if (this.selectedIds.size === 0) return;
+			if (this.isTypingInField() || this.selectedIds.size === 0) return;
 			evt.preventDefault();
 			this.cutSelection();
 			return false;
 		});
 		this.scope.register(["Mod"], "d", (evt) => {
-			if (this.selectedIds.size === 0) return;
+			if (this.isTypingInField() || this.selectedIds.size === 0) return;
 			evt.preventDefault();
 			this.duplicateSelection();
 			return false;
 		});
 		this.scope.register(["Mod"], "a", (evt) => {
-			if (!isSelectionTool(this.plugin.settings.tool)) return;
+			if (this.isTypingInField() || !isSelectionTool(this.plugin.settings.tool)) return;
 			evt.preventDefault();
 			this.selectAll();
 			return false;
 		});
 		this.scope.register([], "Escape", (evt) => {
-			if (this.selectedIds.size === 0) return;
+			if (this.isTypingInField() || this.selectedIds.size === 0) return;
 			evt.preventDefault();
 			this.clearSelection();
 			return false;
@@ -1243,7 +1384,44 @@ export class DrawView extends TextFileView {
 		this.scope.register([], "ArrowUp", (evt) => this.handleSelectionNudgeKey(evt, 0, -1));
 		this.scope.register([], "ArrowDown", (evt) => this.handleSelectionNudgeKey(evt, 0, 1));
 
+		// Raccourcis d'un seul outil par touche, sans modificateur — comme dans
+		// la plupart des logiciels de dessin. Existent AUSSI comme commandes
+		// Obsidian ordinaires (voir main.ts:onload, addToolCommand — sans
+		// raccourci par défaut assigné là-bas) pour rester visibles dans la
+		// palette de commandes et réassignables depuis Paramètres > Raccourcis
+		// clavier ; mais le comportement PAR DÉFAUT (cette touche appuyée)
+		// passe par ce Scope-ci, jamais par le système de commandes d'Obsidian
+		// — celui-ci s'est révélé consommer la frappe au clavier même quand son
+		// checkCallback refusait d'agir, empêchant purement et simplement
+		// d'écrire "p"/"e"/"t"... dans une zone de texte ou le champ hexadécimal
+		// du sélecteur de couleur (voir le bug signalé). isTypingInField() ici
+		// reste, elle, entièrement sous notre contrôle : jamais de
+		// preventDefault() tant qu'on écrit quelque part.
+		for (const [key, tool] of Object.entries(TOOL_SHORTCUTS) as [string, ActiveTool][]) {
+			this.scope.register([], key, (evt) => {
+				if (this.isTypingInField()) return;
+				evt.preventDefault();
+				this.setTool(tool);
+				return false;
+			});
+		}
+
 		this.buildToolbar();
+		// Un clic dans la barre d'outils (pastille de couleur, bouton
+		// d'alignement...) ne doit JAMAIS voler le focus au textarea d'une zone
+		// de texte en cours d'édition (voir this.textEditor) : sans ce
+		// preventDefault sur mousedown, le navigateur déplace le focus dès
+		// l'appui, ce qui déclenche le blur du textarea AVANT que le clic
+		// n'ait la moindre chance de s'appliquer à sa couleur/son alignement —
+		// voir finishTextEditing, appelé par ce blur, qui valide (ou abandonne,
+		// si encore vide) l'édition en cours. mousedown, jamais pointerdown :
+		// c'est le premier qui porte l'action par défaut de changement de
+		// focus dans le navigateur ; l'empêcher ne touche en rien aux propres
+		// écouteurs pointerdown des pastilles (appui long, voir
+		// renderColorPicker), qui continuent de recevoir l'événement.
+		this.toolbarEl.addEventListener("mousedown", (evt) => {
+			if (this.textEditor) evt.preventDefault();
+		});
 
 		this.wrapper = this.contentEl.createDiv({ cls: "quillstone-wrapper" });
 		this.committedCanvas = this.wrapper.createEl("canvas", {
@@ -1304,6 +1482,19 @@ export class DrawView extends TextFileView {
 		});
 		this.pageMoveBtn.hide();
 
+		// Barre de défilement verticale custom (voir updateScrollbar) : le rail
+		// couvre toute la hauteur du volet (top/bottom à 0, voir styles.css) pour
+		// que sa hauteur en pixels égale directement rect.height, sans second
+		// calcul à réconcilier avec clampViewportOffset.
+		this.scrollbarTrackEl = this.wrapper.createDiv({ cls: "quillstone-scrollbar-track" });
+		this.scrollbarThumbEl = this.scrollbarTrackEl.createDiv({ cls: "quillstone-scrollbar-thumb" });
+		this.scrollbarThumbEl.addEventListener("pointerdown", this.onScrollbarThumbPointerDown);
+		this.scrollbarThumbEl.addEventListener("pointermove", this.onScrollbarThumbPointerMove);
+		this.scrollbarThumbEl.addEventListener("pointerup", this.onScrollbarThumbPointerUp);
+		this.scrollbarThumbEl.addEventListener("pointercancel", this.onScrollbarThumbPointerUp);
+		this.scrollbarTrackEl.addEventListener("pointerdown", this.onScrollbarTrackPointerDown);
+		this.scrollbarTrackEl.hide();
+
 		this.committedCanvas.addEventListener("pointerdown", this.onPointerDown);
 		this.committedCanvas.addEventListener("pointermove", this.onPointerMove);
 		this.committedCanvas.addEventListener("pointerup", this.onPointerUp);
@@ -1333,6 +1524,10 @@ export class DrawView extends TextFileView {
 		// limites.
 		this.contentEl.addEventListener("wheel", this.onWheel, { passive: false });
 		this.committedCanvas.addEventListener("contextmenu", this.onContextMenu);
+		// Double-clic sur une zone de texte existante (outil sélection/curseur ou
+		// non, voir onDoubleClick) : rouvre son édition, comme reclique sur du
+		// texte dans n'importe quel logiciel de prise de notes.
+		this.committedCanvas.addEventListener("dblclick", this.onDoubleClick);
 		window.addEventListener("keydown", this.onWindowKeyDown);
 		window.addEventListener("keyup", this.onWindowKeyUp);
 
@@ -1342,15 +1537,32 @@ export class DrawView extends TextFileView {
 			// valables tant que l'échelle effective n'a pas changé, voir
 			// regeneratePageCache().
 			if (this.resizeCanvas()) this.scheduleViewportRedraw();
+			// La taille du curseur de la barre de défilement (voir
+			// updateScrollbar) dépend de la hauteur du volet, indépendamment de
+			// tout changement d'échelle — donc jamais couverte par le `if`
+			// ci-dessus.
+			this.clampViewportOffset();
+			this.updateScrollbar();
 		});
 		this.resizeObserver.observe(this.wrapper);
 
 		this.resizeCanvas();
 		if (!this.viewportRestored) this.fitToWindow();
+		// Le cas `viewportRestored` échappe à fitToWindow() ci-dessus (donc à
+		// l'appel à onViewportChanged() qui recalculerait la barre) : sans cet
+		// appel explicite, ResizeObserver la mettrait bien à jour de lui-même
+		// (son tout premier appel, garanti par la spec dès observe() ci-dessus),
+		// mais un instant plus tard seulement, quitte à l'afficher un bref
+		// instant dans un état obsolète.
+		this.updateScrollbar();
 		this.render();
 	}
 
 	async onClose(): Promise<void> {
+		// Valide plutôt qu'abandonne : fermer la vue (changer de fichier,
+		// fermer l'onglet...) ne doit jamais faire perdre ce qui vient d'être
+		// tapé dans une zone de texte encore ouverte.
+		this.finishTextEditing(true);
 		this.resizeObserver?.disconnect();
 		if (this.cacheRegenTimeout !== null) window.clearTimeout(this.cacheRegenTimeout);
 		for (const rt of this.pages) {
@@ -1371,6 +1583,7 @@ export class DrawView extends TextFileView {
 		this.committedCanvas?.removeEventListener("touchcancel", this.onNativeTouchEvent);
 		this.contentEl.removeEventListener("wheel", this.onWheel);
 		this.committedCanvas?.removeEventListener("contextmenu", this.onContextMenu);
+		this.committedCanvas?.removeEventListener("dblclick", this.onDoubleClick);
 		window.removeEventListener("keydown", this.onWindowKeyDown);
 		window.removeEventListener("keyup", this.onWindowKeyUp);
 		this.contentEl.empty();
@@ -1844,6 +2057,14 @@ export class DrawView extends TextFileView {
 
 			this.applyPageViewTransform(this.activeCtx, pageIndex);
 			drawElement(this.activeCtx, this.activeShape, rt.page.width, rt.page.height, colors.paper);
+		} else if (this.activeTextBox && this.activeTextBoxPageIndex !== null) {
+			this.activeCtx.save();
+			this.activeCtx.setTransform(1, 0, 0, 1, 0, 0);
+			this.activeCtx.drawImage(this.committedCanvas, 0, 0);
+			this.activeCtx.restore();
+
+			this.applyPageViewTransform(this.activeCtx, this.activeTextBoxPageIndex);
+			this.drawActiveTextBoxPreview(this.activeTextBox);
 		} else if (
 			this.plugin.settings.tool === "eraser-zone" &&
 			this.eraserPreviewPoint &&
@@ -2002,6 +2223,20 @@ export class DrawView extends TextFileView {
 			for (const p of shape.points.slice(1)) ctx.lineTo(p.x, p.y);
 		}
 		ctx.stroke();
+		ctx.restore();
+	}
+
+	/** Rectangle en tirets pendant le glissement de création d'une zone de texte (voir onPointerMove/updateActiveTextBox) — même style que drawMarquee, jamais l'aperçu du texte lui-même (vide au tout début du geste, et de toute façon édité ensuite dans un vrai textarea, voir startTextEditing). */
+	private drawActiveTextBoxPreview(box: { x: number; y: number; width: number; height: number }): void {
+		const styles = getComputedStyle(this.containerEl);
+		const accent = styles.getPropertyValue("--interactive-accent").trim() || "#7c6ee6";
+
+		const ctx = this.activeCtx;
+		ctx.save();
+		ctx.strokeStyle = accent;
+		ctx.lineWidth = 1.5 / this.viewport.scale;
+		ctx.setLineDash([6 / this.viewport.scale, 4 / this.viewport.scale]);
+		ctx.strokeRect(box.x, box.y, box.width, box.height);
 		ctx.restore();
 	}
 
@@ -2206,6 +2441,7 @@ export class DrawView extends TextFileView {
 		this.viewport.scale = clamp(this.viewport.scale, MIN_SCALE, MAX_SCALE);
 		this.clampViewportOffset();
 		this.updateZoomLabel();
+		this.updateScrollbar();
 		this.scheduleViewportRedraw();
 		this.scheduleActiveRedraw();
 
@@ -2228,11 +2464,16 @@ export class DrawView extends TextFileView {
 	 * horizontalement, une page plus étroite que le volet doit rester
 	 * librement déplaçable des deux côtés.
 	 */
-	private clampViewportOffset(): void {
-		if (!this.wrapper || this.pages.length === 0) return;
-		const rect = this.wrapper.getBoundingClientRect();
-		if (rect.height <= 0) return;
-
+	/**
+	 * Bornes valides de Viewport.offsetY pour un volet de hauteur `rect.height`
+	 * — extrait de clampViewportOffset (qui les applique) pour que
+	 * scrollbarMetrics (qui les traduit en position/taille du curseur de la
+	 * barre de défilement) reste TOUJOURS d'accord avec elle sur ce qui compte
+	 * comme "tout en haut"/"tout en bas" du document, sans dupliquer le calcul.
+	 * `min > max` signale un document plus petit que le volet (voir les deux
+	 * appelants, qui gèrent chacun ce cas à leur façon).
+	 */
+	private verticalOffsetRange(rect: { height: number }): { min: number; max: number } {
 		const margin = 24;
 		const scale = this.viewport.scale;
 		const first = this.pages[0];
@@ -2244,8 +2485,17 @@ export class DrawView extends TextFileView {
 		// `margin` (borne haute de offsetY) ; le bas de la dernière page ne
 		// doit jamais remonter plus haut que `rect.height - margin` (borne
 		// basse). Voir documentToScreen : screen_y = offsetY + doc_y * scale.
-		const maxOffsetY = margin - contentTop;
-		const minOffsetY = rect.height - margin - contentBottom;
+		return { max: margin - contentTop, min: rect.height - margin - contentBottom };
+	}
+
+	private clampViewportOffset(): void {
+		if (!this.wrapper || this.pages.length === 0) return;
+		const rect = this.wrapper.getBoundingClientRect();
+		if (rect.height <= 0) return;
+
+		const margin = 24;
+		const scale = this.viewport.scale;
+		const { min: minOffsetY, max: maxOffsetY } = this.verticalOffsetRange(rect);
 
 		this.viewport.offsetY =
 			minOffsetY <= maxOffsetY
@@ -2269,6 +2519,136 @@ export class DrawView extends TextFileView {
 		this.viewport.offsetX =
 			minOffsetX <= maxOffsetX ? clamp(this.viewport.offsetX, minOffsetX, maxOffsetX) : (minOffsetX + maxOffsetX) / 2;
 	}
+
+	// --- Barre de défilement verticale --------------------------------------------
+	//
+	// Purement un raccourci visuel par-dessus le panoramique déjà existant
+	// (molette, glisser à la souris/au doigt, flèches du clavier — voir
+	// handleSelectionNudgeKey) : jamais le seul moyen de défiler, jamais de
+	// nouvel état persisté. Masquée dès qu'il n'y a qu'une seule page ou que
+	// tout le document tient déjà dans le volet (rien à faire défiler) — voir
+	// updateScrollbar, seul endroit qui décide de l'afficher.
+
+	/**
+	 * Géométrie du rail/curseur pour l'état courant (page, zoom, taille du
+	 * volet) — `null` si la barre n'a pas lieu d'être affichée (une seule
+	 * page, ou document plus petit que le volet). Le rail occupe toute la
+	 * hauteur du volet (voir sa CSS, top/bottom à 0) : `trackHeight` vaut donc
+	 * directement `rect.height`, sans second calcul à réconcilier avec
+	 * verticalOffsetRange.
+	 */
+	private scrollbarMetrics(): { minOffsetY: number; maxOffsetY: number; trackHeight: number; thumbHeight: number } | null {
+		if (!this.wrapper || this.pages.length <= 1) return null;
+		const rect = this.wrapper.getBoundingClientRect();
+		if (rect.height <= 0) return null;
+
+		const { min: minOffsetY, max: maxOffsetY } = this.verticalOffsetRange(rect);
+		if (minOffsetY >= maxOffsetY) return null; // document plus petit que le volet : rien à faire défiler
+
+		const trackHeight = rect.height;
+		const range = maxOffsetY - minOffsetY;
+		// La part du document visible à l'écran par rapport à sa hauteur totale
+		// (range + trackHeight, voir la dérivation dans le commentaire de
+		// verticalOffsetRange/clampViewportOffset) — comme n'importe quelle
+		// barre de défilement standard : plus le document est long, plus le
+		// curseur est court.
+		const thumbHeight = clamp(
+			(trackHeight * trackHeight) / (range + trackHeight),
+			Math.min(SCROLLBAR_MIN_THUMB_PX, trackHeight),
+			trackHeight
+		);
+		return { minOffsetY, maxOffsetY, trackHeight, thumbHeight };
+	}
+
+	/** Recalcule visibilité, taille et position du curseur — à appeler après tout changement de cadrage (onViewportChanged), de structure du document (layoutPages) ou de taille du volet (ResizeObserver). */
+	private updateScrollbar(): void {
+		if (!this.scrollbarTrackEl || !this.scrollbarThumbEl) return;
+		const metrics = this.scrollbarMetrics();
+		if (!metrics) {
+			this.scrollbarTrackEl.hide();
+			return;
+		}
+		this.scrollbarTrackEl.show();
+
+		const scrollFraction = clamp(
+			(metrics.maxOffsetY - this.viewport.offsetY) / (metrics.maxOffsetY - metrics.minOffsetY),
+			0,
+			1
+		);
+		const thumbTop = scrollFraction * (metrics.trackHeight - metrics.thumbHeight);
+		this.scrollbarThumbEl.setCssStyles({ top: `${thumbTop}px`, height: `${metrics.thumbHeight}px` });
+	}
+
+	/** Convertit une fraction de défilement (0 = tout en haut, 1 = tout en bas) en Viewport.offsetY, et applique — partagé par le glissement du curseur et le clic direct sur le rail. */
+	private setScrollFraction(metrics: { minOffsetY: number; maxOffsetY: number }, fraction: number): void {
+		this.viewport.offsetY = metrics.maxOffsetY - clamp(fraction, 0, 1) * (metrics.maxOffsetY - metrics.minOffsetY);
+		this.onViewportChanged();
+	}
+
+	private onScrollbarThumbPointerDown = (event: PointerEvent): void => {
+		if (event.button !== 0) return;
+		// Ne doit jamais atteindre committedCanvas (dessin/sélection) ni le rail
+		// lui-même (onScrollbarTrackPointerDown, qui sauterait sinon au clic
+		// directement sous le curseur au lieu de le faire glisser depuis là où
+		// on l'a saisi).
+		event.preventDefault();
+		event.stopPropagation();
+		const metrics = this.scrollbarMetrics();
+		if (!metrics) return;
+		this.scrollbarThumbEl.setPointerCapture(event.pointerId);
+		this.scrollbarDrag = {
+			pointerId: event.pointerId,
+			startClientY: event.clientY,
+			startOffsetY: this.viewport.offsetY,
+			minOffsetY: metrics.minOffsetY,
+			maxOffsetY: metrics.maxOffsetY,
+			trackHeight: metrics.trackHeight,
+			thumbHeight: metrics.thumbHeight,
+		};
+	};
+
+	private onScrollbarThumbPointerMove = (event: PointerEvent): void => {
+		const drag = this.scrollbarDrag;
+		if (!drag || event.pointerId !== drag.pointerId) return;
+		event.preventDefault();
+		// Figé au pointerdown (voir ScrollbarDrag) : jamais recalculé en cours de
+		// glissement, même raison que TransformSession.snapshot — éviter toute
+		// dérive d'arrondi sur un glissement prolongé.
+		const travel = Math.max(1, drag.trackHeight - drag.thumbHeight);
+		const deltaClientY = event.clientY - drag.startClientY;
+		const range = drag.maxOffsetY - drag.minOffsetY;
+		// Le curseur descend (deltaClientY > 0) quand on veut voir plus bas dans
+		// le document, donc offsetY doit DIMINUER — même convention que onWheel/
+		// handleSelectionNudgeKey (voir documentToScreen : screen_y = offsetY +
+		// doc_y * scale).
+		this.viewport.offsetY = drag.startOffsetY - (deltaClientY / travel) * range;
+		this.onViewportChanged();
+	};
+
+	private onScrollbarThumbPointerUp = (event: PointerEvent): void => {
+		if (!this.scrollbarDrag || event.pointerId !== this.scrollbarDrag.pointerId) return;
+		this.scrollbarDrag = null;
+	};
+
+	/**
+	 * Clic directement sur le rail (jamais sur le curseur lui-même —
+	 * onScrollbarThumbPointerDown l'intercepte avant, stopPropagation
+	 * empêchant cet écouteur-ci de le voir passer) : saute directement à
+	 * l'endroit cliqué, le curseur recentré sous le pointeur — comme la
+	 * plupart des barres de défilement natives au clic sur le rail (jamais un
+	 * simple "page suivante/précédente" façon défilement par page).
+	 */
+	private onScrollbarTrackPointerDown = (event: PointerEvent): void => {
+		if (event.button !== 0) return;
+		event.preventDefault();
+		const metrics = this.scrollbarMetrics();
+		if (!metrics) return;
+		const rect = this.scrollbarTrackEl.getBoundingClientRect();
+		const clickY = event.clientY - rect.top;
+		const travel = Math.max(1, metrics.trackHeight - metrics.thumbHeight);
+		const targetTop = clamp(clickY - metrics.thumbHeight / 2, 0, travel);
+		this.setScrollFraction(metrics, targetTop / travel);
+	};
 
 	/** Marque toutes les pages à régénérer une fois le geste de zoom stabilisé — leur régénération réelle reste paresseuse (voir redrawViewport, appelé juste après) : seules les pages visibles à ce moment-là sont retracées tout de suite. */
 	private scheduleCacheRegenAfterSettle(): void {
@@ -2429,6 +2809,11 @@ export class DrawView extends TextFileView {
 	};
 
 	private onWindowKeyDown = (event: KeyboardEvent): void => {
+		// La barre d'espace doit rester une simple espace tapée dans un champ
+		// de saisie (zone de texte, hex du sélecteur de couleur...) — jamais le
+		// déclencheur du panoramique (voir isPanTrigger) qui l'utilise partout
+		// ailleurs dans la vue.
+		if (this.isTypingInField()) return;
 		if (event.code !== "Space" || event.repeat) return;
 		if (this.app.workspace.getActiveViewOfType(DrawView) !== this) return;
 		event.preventDefault();
@@ -2441,6 +2826,32 @@ export class DrawView extends TextFileView {
 		this.spacePressed = false;
 		this.updateCursor();
 	};
+
+	/**
+	 * Vrai si le focus est actuellement dans un champ de saisie ordinaire : le
+	 * textarea d'édition d'une zone de texte (this.textEditor), mais aussi
+	 * n'importe quel `<input>`/`<textarea>`/élément contenteditable ailleurs
+	 * dans la vue — le champ hexadécimal du sélecteur de couleur (voir
+	 * colorPicker.ts), par exemple, qui vit dans document.body mais reste
+	 * concerné par le Scope de cette vue tant qu'aucun autre n'a pris le
+	 * dessus. Tous les raccourcis clavier de la vue enregistrés sans
+	 * modificateur (voir onOpen — Suppr, les raccourcis d'outil à une lettre,
+	 * etc.) doivent s'effacer devant une frappe ordinaire dans un tel champ :
+	 * sans cette garde, taper par exemple une couleur "#dead00" y aurait
+	 * changé d'outil à chaque "d"/"e" au lieu d'écrire le chiffre. Publique :
+	 * aussi vérifiée par main.ts (addDrawViewCommand) avant d'exécuter une
+	 * commande Obsidian déclenchée par une touche sans modificateur (P, T,
+	 * E...) — ces raccourcis vivent désormais comme des commandes ordinaires
+	 * (réglables dans Paramètres > Raccourcis clavier), donc hors du Scope de
+	 * cette vue, mais doivent s'effacer devant la frappe exactement de la
+	 * même façon.
+	 */
+	isTypingInField(): boolean {
+		if (this.textEditor) return true;
+		const active = document.activeElement;
+		if (!active) return false;
+		return active.tagName === "INPUT" || active.tagName === "TEXTAREA" || (active as HTMLElement).isContentEditable;
+	}
 
 	private isPanTrigger(event: PointerEvent): boolean {
 		if (event.button === 1) return true; // clic milieu maintenu
@@ -2638,7 +3049,9 @@ export class DrawView extends TextFileView {
 		const menu = new Menu();
 		const page = this.selectedPageIndex !== null ? this.pages[this.selectedPageIndex].page : null;
 		const hasColorable = page
-			? page.elements.some((el) => this.selectedIds.has(el.id) && (el.type === "stroke" || el.type === "shape"))
+			? page.elements.some(
+					(el) => this.selectedIds.has(el.id) && (el.type === "stroke" || el.type === "shape" || el.type === "text")
+			  )
 			: false;
 
 		menu.addItem((item) =>
@@ -2680,7 +3093,7 @@ export class DrawView extends TextFileView {
 	private firstSelectedStrokeColor(): string | null {
 		if (this.selectedPageIndex === null) return null;
 		for (const el of this.pages[this.selectedPageIndex].page.elements) {
-			if (this.selectedIds.has(el.id) && (el.type === "stroke" || el.type === "shape")) return el.color;
+			if (this.selectedIds.has(el.id) && (el.type === "stroke" || el.type === "shape" || el.type === "text")) return el.color;
 		}
 		return null;
 	}
@@ -2909,6 +3322,12 @@ export class DrawView extends TextFileView {
 		for (const tool of TOOLS) {
 			const btn = tools.createDiv({ cls: "clickable-icon" });
 			setIcon(btn, TOOL_ICONS[tool]);
+			// Jamais de raccourci codé en dur dans l'info-bulle : les raccourcis
+			// d'outil sont des commandes Obsidian ordinaires (voir
+			// main.ts:onload, addToolCommand), donc réglables — un indice figé
+			// ici pourrait afficher une touche que l'utilisateur a réassignée
+			// depuis Paramètres > Raccourcis clavier, où la vraie affectation
+			// courante reste toujours consultable.
 			btn.setAttribute("aria-label", TOOL_LABELS[tool]);
 			btn.addEventListener("click", () => this.setTool(tool));
 			this.toolButtons.set(tool, btn);
@@ -2943,6 +3362,20 @@ export class DrawView extends TextFileView {
 			btn.setAttribute("aria-label", `Thickness ${size}`);
 			btn.addEventListener("click", () => this.setSize(size));
 			this.sizeButtons.set(size, btn);
+		}
+
+		// Alignement du texte : masqué/affiché selon le contexte (voir
+		// syncToolbarState) — outil texte actif, zone de texte en cours
+		// d'édition, ou sélection contenant au moins une zone de texte. Le clic
+		// s'applique à celui des trois qui est vrai (voir setTextAlign).
+		this.textAlignGroupEl = this.toolbarEl.createDiv({ cls: "quillstone-toolbar-group" });
+		for (const align of TEXT_ALIGNS) {
+			const btn = this.textAlignGroupEl.createDiv({ cls: "clickable-icon" });
+			setIcon(btn, TEXT_ALIGN_ICONS[align]);
+			btn.setAttribute("aria-label", TEXT_ALIGN_LABELS[align]);
+			setTooltip(btn, TEXT_ALIGN_LABELS[align]);
+			btn.addEventListener("click", () => this.setTextAlign(align));
+			this.textAlignButtons.set(align, btn);
 		}
 
 		const history = this.toolbarEl.createDiv({ cls: "quillstone-toolbar-group" });
@@ -3334,6 +3767,7 @@ export class DrawView extends TextFileView {
 			onCommit: (color) => {
 				entry.palette[index] = color;
 				entry.active = color;
+				this.applyLiveTextColor(tool, color);
 				void this.plugin.saveSettings();
 				this.renderColorPicker();
 				this.scheduleActiveRedraw();
@@ -3345,8 +3779,24 @@ export class DrawView extends TextFileView {
 	/** Aperçu en direct (voir colorPicker.ts:onPreview) : applique `color` à l'outil sans la persister — un Annuler/Échap/clic extérieur la remplace par la couleur précédente sans laisser de trace dans les réglages. */
 	private previewColorLive(tool: ColorableTool, color: string): void {
 		this.plugin.settings.colors[tool].active = color;
+		this.applyLiveTextColor(tool, color);
 		this.syncColorActiveStates();
 		this.scheduleActiveRedraw();
+	}
+
+	/**
+	 * Si une zone de texte est en cours d'édition (voir this.textEditor) ET
+	 * que `tool` est celui dont elle suit la couleur active (voir
+	 * activeColorTool — jamais "highlighter" hors le surligneur lui-même) :
+	 * répercute `color` sur cette zone tout de suite, aperçu compris dans le
+	 * textarea — persisté seulement à la validation (voir finishTextEditing),
+	 * comme le texte tapé. Sans effet dans tous les autres cas (pas d'édition
+	 * en cours, ou la couleur qui change n'est pas celle que cette zone suit).
+	 */
+	private applyLiveTextColor(tool: ColorableTool, color: string): void {
+		if (!this.textEditor || tool !== this.activeColorTool) return;
+		this.textEditor.draft.color = color;
+		this.textEditor.ta.style.color = color;
 	}
 
 	/**
@@ -3383,6 +3833,7 @@ export class DrawView extends TextFileView {
 	private setActiveColor(tool: ColorableTool, color: string, addToRecent: boolean): void {
 		const entry = this.plugin.settings.colors[tool];
 		entry.active = color;
+		this.applyLiveTextColor(tool, color);
 		const recentChanged = addToRecent && this.pushRecentColor(tool, color);
 		void this.plugin.saveSettings();
 
@@ -3433,15 +3884,53 @@ export class DrawView extends TextFileView {
 		// (voir activeColorTool, jamais "highlighter" hors le surligneur
 		// lui-même) : la palette reste donc pertinente pour elles aussi,
 		// jamais pour le laser (aucune couleur personnalisable, voir
-		// LASER_COLOR) ni les gommes.
-		const colorRelevant = tool === "pen" || tool === "highlighter" || isShapeTool(tool);
+		// LASER_COLOR) ni les gommes. `this.textEditor` : une édition en cours
+		// a pu être ouverte avec n'importe quel autre outil actif (double-clic,
+		// voir onDoubleClick) — la couleur doit rester modifiable même si
+		// `tool` lui-même ne la rendrait pas pertinente.
+		const colorRelevant =
+			tool === "pen" || tool === "highlighter" || tool === "text" || isShapeTool(tool) || this.textEditor !== null;
 		this.colorsGroupEl.toggleClass("is-irrelevant", !colorRelevant);
 
 		for (const [size, btn] of this.sizeButtons) {
 			btn.toggleClass("is-active", size === this.plugin.settings.size);
 		}
 
+		// updateSelectionActionsToolbar() appelle elle-même syncTextAlignToolbar()
+		// en tout premier, avant son propre retour anticipé si la sélection est
+		// vide — inutile de l'appeler une seconde fois ici.
 		this.updateSelectionActionsToolbar();
+	}
+
+	/**
+	 * Affiche le groupe d'alignement UNIQUEMENT pendant une édition de zone de
+	 * texte en cours (this.textEditor) — jamais au repos, même outil texte
+	 * actif ou zone de texte sélectionnée : contrairement à la couleur
+	 * (voir colorRelevant), l'alignement ne se règle que depuis l'intérieur
+	 * d'une édition (voir setTextAlign), comme demandé.
+	 */
+	private syncTextAlignToolbar(): void {
+		if (!this.textAlignGroupEl) return;
+		const relevant = this.textEditor !== null;
+		// "is-hidden" (display: none), jamais "is-irrelevant" (qui ne fait
+		// qu'estomper à 35% d'opacité SANS masquer, voir styles.css) : demandé
+		// explicitement — ce groupe doit disparaître entièrement en dehors
+		// d'une édition, pas simplement paraître grisé (voir le bug signalé).
+		this.textAlignGroupEl.toggleClass("is-hidden", !relevant);
+		if (!relevant) return;
+
+		const current = this.textEditor?.draft.align ?? "left";
+		for (const [align, btn] of this.textAlignButtons) {
+			btn.toggleClass("is-active", align === current);
+		}
+	}
+
+	/** Aperçu immédiat dans le textarea (voir TextEditorSession.draft) — persisté seulement à la validation, comme la couleur. Sans effet hors édition : le groupe reste alors masqué (voir syncTextAlignToolbar), ces boutons ne sont pas cliquables dans ce cas. */
+	private setTextAlign(align: TextAlign): void {
+		if (!this.textEditor) return;
+		this.textEditor.draft.align = align;
+		this.textEditor.ta.style.textAlign = align;
+		this.syncTextAlignToolbar();
 	}
 
 	/** Force la barre d'outils (palettes de couleurs comprises) à se reconstruire au prochain rendu — appelé depuis la page de réglages (voir main.ts:refreshOpenDrawViews) après une modification d'une palette. */
@@ -3468,6 +3957,12 @@ export class DrawView extends TextFileView {
 	 */
 	private updateSelectionActionsToolbar(): void {
 		if (!this.selectionActionsGroupEl) return;
+		// Indépendant du reste de cette méthode (qui s'arrête plus bas si la
+		// sélection est vide) : le groupe d'alignement doit aussi se
+		// masquer/rafraîchir dès qu'une sélection contenant une zone de texte
+		// est faite ou défaite, pas seulement à un changement d'outil (voir
+		// syncToolbarState, qui l'appelle aussi).
+		this.syncTextAlignToolbar();
 		const hasSelection = this.selectedIds.size > 0;
 		this.selectionActionsGroupEl.toggleClass("is-hidden", !hasSelection);
 		if (!hasSelection) return;
@@ -3508,7 +4003,8 @@ export class DrawView extends TextFileView {
 		return this.plugin.settings.size * ERASER_RADIUS_SCALE;
 	}
 
-	private setTool(tool: ActiveTool): void {
+	/** Publique : appelée aussi depuis main.ts par les commandes de changement d'outil (voir plugin.addToolCommand), enregistrées comme des raccourcis Obsidian ordinaires — réglables dans Paramètres > Raccourcis clavier, contrairement à un raccourci fixe attaché directement à cette vue. */
+	setTool(tool: ActiveTool): void {
 		this.plugin.settings.tool = tool;
 		void this.plugin.saveSettings();
 		this.returnToPenAfterDeselect = false;
@@ -4049,6 +4545,21 @@ export class DrawView extends TextFileView {
 	private onPointerDown = (event: PointerEvent): void => {
 		if (event.button === 2) return; // clic droit réservé au menu contextuel (voir onContextMenu) : jamais un trait ni une gomme, quel que soit l'outil actif
 
+		// Un clic à côté pendant qu'une zone de texte est en cours d'édition la
+		// valide (comme un blur — voir finishTextEditing, qui bascule sur
+		// l'outil sélection avec la zone déjà sélectionnée, prête à déplacer/
+		// redimensionner). Ce clic sert UNIQUEMENT à valider : il s'arrête là,
+		// jamais transmis en plus à la sélection/au dessin en dessous — sinon,
+		// tombant le plus souvent à côté de la zone qu'on vient de créer, il
+		// la désélectionnerait aussitôt (voir onSelectPointerDown, "zone vide")
+		// et annulerait l'effet recherché ici. (Le blur natif du textarea,
+		// juste après, retrouve alors this.textEditor déjà nul et ne fait
+		// rien — jamais de double validation.)
+		if (this.textEditor) {
+			this.finishTextEditing(true);
+			return;
+		}
+
 		// Tout nouveau contact interrompt un défilement par inertie encore en
 		// cours (voir startMomentumScroll) : comme sur une page web mobile, on
 		// ne continue jamais un défilement pendant qu'on touche déjà l'écran
@@ -4199,6 +4710,29 @@ export class DrawView extends TextFileView {
 
 		if (isSelectionTool(tool)) {
 			this.onSelectPointerDown(event, pageIndex, x, y, tool === "select");
+			return;
+		}
+
+		if (tool === "text") {
+			// Reclic direct sur une zone de texte EXISTANTE (non verrouillée) :
+			// rouvre son édition plutôt que d'en empiler une nouvelle par-dessus
+			// — voir la fonctionnalité demandée. Un double-clic (voir
+			// onDoubleClick) fait la même chose avec n'importe quel autre outil.
+			const hit = this.hitTestElementAt(pageIndex, x, y);
+			if (hit && hit.type === "text" && !hit.locked) {
+				this.startTextEditing(pageIndex, hit, false);
+				return;
+			}
+
+			// Sinon, amorce un glissement (voir updateActiveTextBox/
+			// finishTextBoxCreation) : un simple clic sans glissement réel se
+			// résout comme avant (boîte qui épouse le texte tapé), un
+			// glissement volontaire fige sa LARGEUR à la taille dessinée —
+			// comme une forme de la palette, voir isShapeTool/activeShape.
+			this.activeTextBoxPageIndex = pageIndex;
+			this.activeTextBoxStart = [x, y];
+			this.activeTextBox = { x, y, width: 0, height: 0 };
+			this.scheduleActiveRedraw();
 			return;
 		}
 
@@ -4390,6 +4924,16 @@ export class DrawView extends TextFileView {
 			return;
 		}
 
+		if (this.activeTextBox && this.activeTextBoxPageIndex !== null) {
+			const pageIndex = this.activeTextBoxPageIndex;
+			const last = source[source.length - 1];
+			const [docX, docY] = this.eventToXY(last, rect);
+			const [x, y] = this.toPageLocal(pageIndex, docX, docY);
+			this.updateActiveTextBox([x, y], last.shiftKey);
+			this.scheduleActiveRedraw();
+			return;
+		}
+
 		if (!this.activeStroke || this.activeStrokePageIndex === null) return;
 		const pageIndex = this.activeStrokePageIndex;
 
@@ -4490,6 +5034,16 @@ export class DrawView extends TextFileView {
 			return;
 		}
 
+		if (this.activeTextBox && this.activeTextBoxPageIndex !== null) {
+			const pageIndex = this.activeTextBoxPageIndex;
+			const [docX, docY] = this.eventToXY(event, rect);
+			const [x, y] = this.toPageLocal(pageIndex, docX, docY);
+			this.updateActiveTextBox([x, y], event.shiftKey);
+			this.finishTextBoxCreation();
+			this.activePointerId = null;
+			return;
+		}
+
 		if (this.activeStroke && this.activeStrokePageIndex !== null) {
 			const pageIndex = this.activeStrokePageIndex;
 			if (this.straightLine) {
@@ -4550,6 +5104,15 @@ export class DrawView extends TextFileView {
 			this.activeShape = null;
 			this.activeShapePageIndex = null;
 			this.activeShapeStart = null;
+			this.activePointerId = null;
+			this.clearActiveCanvasFull();
+			return;
+		}
+
+		if (this.activeTextBox) {
+			this.activeTextBox = null;
+			this.activeTextBoxPageIndex = null;
+			this.activeTextBoxStart = null;
 			this.activePointerId = null;
 			this.clearActiveCanvasFull();
 			return;
@@ -4783,6 +5346,314 @@ export class DrawView extends TextFileView {
 		this.returnToPenAfterDeselect = true;
 		this.autoSelectShapeId = shape.id;
 	}
+
+	// --- Zone de texte -------------------------------------------------------------
+	//
+	// Une zone de texte se construit par CLIC (largeur de confort qui épouse
+	// ensuite le texte tapé, plafonnée à TEXT_DEFAULT_WIDTH — voir
+	// finishTextBoxCreation/measureTextBoxSize) ou par CLIC-GLISSÉ (largeur
+	// figée à la taille dessinée, comme une forme de la palette — voir
+	// updateActiveTextBox) : les deux ouvrent this.textEditor par-dessus le
+	// canevas (un vrai <textarea> HTML, jamais un second système de saisie
+	// maison) pour taper au clavier. Le texte ne rejoint page.elements qu'à
+	// la validation (finishTextEditing), jamais pendant la frappe — jusque-là,
+	// il n'existe que dans le DOM du textarea, exactement comme une case de
+	// formulaire ordinaire.
+
+	/**
+	 * Recalcule entièrement activeTextBox à partir du point de départ figé
+	 * (activeTextBoxStart) et de la position courante — même principe
+	 * qu'updateActiveShape pour un rectangle. Maj maintenue impose un rapport
+	 * 1:1 ("un carré"), plafonné pour ne jamais dépasser la feuille.
+	 */
+	private updateActiveTextBox(current: [number, number], shiftKey: boolean): void {
+		const box = this.activeTextBox;
+		const start = this.activeTextBoxStart;
+		if (!box || !start || this.activeTextBoxPageIndex === null) return;
+		const page = this.pages[this.activeTextBoxPageIndex].page;
+
+		const [sx, sy] = start;
+		const [cx, cy] = this.clampToPage(this.activeTextBoxPageIndex, current[0], current[1]);
+		let dx = cx - sx;
+		let dy = cy - sy;
+
+		if (shiftKey) {
+			const maxDX = dx < 0 ? sx : page.width - sx;
+			const maxDY = dy < 0 ? sy : page.height - sy;
+			const side = Math.min(Math.max(Math.abs(dx), Math.abs(dy)), maxDX, maxDY);
+			dx = (dx < 0 ? -1 : 1) * side;
+			dy = (dy < 0 ? -1 : 1) * side;
+		}
+
+		box.x = Math.min(sx, sx + dx);
+		box.y = Math.min(sy, sy + dy);
+		box.width = Math.abs(dx);
+		box.height = Math.abs(dy);
+	}
+
+	/**
+	 * Fin du geste de l'outil texte (pointerup) : un déplacement resté sous
+	 * TEXT_DRAG_MIN_SCREEN_PX est traité comme un simple clic (largeur de
+	 * confort TEXT_DEFAULT_WIDTH, qui épousera le texte tapé à la validation,
+	 * plafonnée à cette même largeur — voir finishTextEditing/
+	 * measureTextBoxSize) ; au-delà, la largeur DESSINÉE (`box.width`, repère
+	 * de page) est figée pour de bon (voir TextElement.width, model.ts) — la
+	 * hauteur, elle, suit TOUJOURS le texte tapé à cette largeur, glissement
+	 * ou non. Le seuil lui-même se mesure en repère ÉCRAN (voir
+	 * TEXT_DRAG_MIN_SCREEN_PX, sa doc) : `box.width`/`box.height` (repère de
+	 * page, déjà éprouvés — c'est ce que montre l'aperçu en tirets pendant le
+	 * geste, voir drawActiveTextBoxPreview) sont donc reconvertis en pixels
+	 * écran via l'échelle courante juste pour cette comparaison, plutôt que
+	 * de suivre une trace séparée en clientX/clientY (une first tentative,
+	 * dont un écart encore inexpliqué avec ce que montrait l'aperçu a motivé
+	 * cette simplification — voir le bug signalé).
+	 */
+	private finishTextBoxCreation(): void {
+		const box = this.activeTextBox;
+		const pageIndex = this.activeTextBoxPageIndex;
+		this.activeTextBox = null;
+		this.activeTextBoxPageIndex = null;
+		this.activeTextBoxStart = null;
+		this.clearActiveCanvasFull();
+		if (!box || pageIndex === null) return;
+
+		const size = this.plugin.settings.size;
+		const scale = this.viewport.scale;
+		const dragged = box.width * scale >= TEXT_DRAG_MIN_SCREEN_PX || box.height * scale >= TEXT_DRAG_MIN_SCREEN_PX;
+		const width = dragged ? Math.max(TEXT_BOX_MIN_WIDTH_PX, box.width) : TEXT_DEFAULT_WIDTH;
+		// La hauteur DESSINÉE (box.height) sert de PLANCHER, jamais de valeur
+		// fixe : measureTextHeight("", ...) vaut toujours une seule ligne (rien
+		// n'est encore tapé) — sans ce plancher, une boîte glissée haute (un
+		// carré, par exemple) s'effondrait immédiatement à la hauteur d'une
+		// seule ligne dès l'ouverture de l'édition, avant même d'avoir tapé
+		// quoi que ce soit (voir le bug signalé : "elle est rétrécie"). Un
+		// simple clic (dragged = false) n'a rien à respecter ici, box.height
+		// valant alors 0 ou un tremblement de main négligeable.
+		const height = dragged ? Math.max(box.height, measureTextHeight("", width, size)) : measureTextHeight("", width, size);
+		const draft: TextElement = {
+			id: newStrokeId(),
+			type: "text",
+			x: box.x,
+			y: box.y,
+			width,
+			height,
+			rotation: 0,
+			color: this.activeColor,
+			size,
+			text: "",
+			align: this.plugin.settings.textAlign,
+		};
+		this.startTextEditing(pageIndex, draft, true, !dragged);
+	}
+
+	/**
+	 * Affiche le textarea d'édition, positionné et dimensionné pour se
+	 * superposer exactement à `element` — que ce soit une boîte fraîchement
+	 * créée (`isNew`, pas encore dans page.elements, voir
+	 * finishTextBoxCreation) ou une boîte existante rouverte par reclic avec
+	 * l'outil texte (voir onPointerDown) ou double-clic avec un autre outil
+	 * (voir onDoubleClick). Une édition déjà en cours est d'abord validée
+	 * (jamais deux textarea ouverts à la fois).
+	 */
+	private startTextEditing(pageIndex: number, element: TextElement, isNew: boolean, autoFitWidth = false): void {
+		if (this.textEditor) this.finishTextEditing(true);
+
+		const ta = this.wrapper.createEl("textarea", { cls: "quillstone-text-editor" });
+		ta.value = element.text;
+		ta.spellcheck = false;
+
+		// cloneElement (jamais `element` par référence) : les changements de
+		// couleur/alignement en direct pendant cette édition (voir
+		// applyLiveTextColor/setTextAlign) écrivent dans CE clone, jamais dans
+		// l'élément déjà présent sur la page tant que la validation n'a pas
+		// eu lieu (voir finishTextEditing) — annuler (Échap) doit les
+		// abandonner exactement comme le texte tapé.
+		this.textEditor = {
+			ta,
+			pageIndex,
+			elementId: isNew ? null : element.id,
+			draft: this.cloneElement(element) as TextElement,
+			autoFitWidth,
+		};
+		this.positionTextEditor(pageIndex, element);
+
+		ta.addEventListener("input", () => {
+			// Auto-agrandissement vertical pendant la frappe, purement visuel —
+			// la hauteur réellement persistée à la validation vient de
+			// measureTextHeight (voir finishTextEditing), pas de scrollHeight :
+			// les deux s'accordent de très près (même police, même marge
+			// interne) sans avoir besoin d'être identiques au pixel près.
+			ta.style.height = "auto";
+			ta.style.height = `${ta.scrollHeight}px`;
+		});
+		ta.addEventListener("blur", () => this.finishTextEditing(true));
+		ta.addEventListener("keydown", (evt) => {
+			if (evt.key === "Escape") {
+				evt.preventDefault();
+				this.finishTextEditing(false);
+			}
+		});
+
+		// focus() en synchrone échoue parfois juste après l'insertion d'un
+		// nouvel élément dans certains WebView mobiles (l'élément n'a pas
+		// encore de mise en page) — une frame plus tard le résout, sans effet
+		// visible pour l'utilisateur.
+		window.requestAnimationFrame(() => {
+			ta.focus();
+			if (!isNew) ta.select();
+			ta.style.height = "auto";
+			ta.style.height = `${ta.scrollHeight}px`;
+		});
+
+		// Groupes couleur/alignement de la barre d'outils : pertinents dès
+		// l'ouverture de cette édition, quel que soit l'outil actif (voir
+		// syncToolbarState/syncTextAlignToolbar, qui testent this.textEditor).
+		this.syncToolbarState();
+	}
+
+	/** Position/taille/police/alignement du textarea, en repère écran — recalculée une seule fois à l'ouverture (voir startTextEditing) : un panoramique/zoom pendant l'édition n'est pas suivi, cas limite accepté pour cette première version. */
+	private positionTextEditor(pageIndex: number, element: TextElement): void {
+		const ta = this.textEditor?.ta;
+		if (!ta) return;
+		const scale = this.viewport.scale;
+		const [sx, sy] = this.pageToScreen(pageIndex, element.x, element.y);
+		ta.setCssStyles({
+			left: `${sx}px`,
+			top: `${sy}px`,
+			width: `${element.width * scale}px`,
+			minHeight: `${element.height * scale}px`,
+			fontSize: `${textFontSize(element.size) * scale}px`,
+			lineHeight: `${TEXT_LINE_HEIGHT_RATIO}`,
+			padding: `${TEXT_PADDING_PX * scale}px`,
+			color: element.color,
+			textAlign: element.align ?? "left",
+		});
+	}
+
+	/**
+	 * Valide (`commit`) ou annule l'édition en cours. Annuler ne touche jamais
+	 * `page.elements` : pendant toute la frappe (texte, couleur ET
+	 * alignement, voir TextEditorSession.draft), rien n'a vécu que dans le
+	 * textarea et ce clone (voir la doc de la section) — annuler revient donc
+	 * simplement à les abandonner, une création abandonnée ne laisse
+	 * d'ailleurs jamais de trace dans l'historique. Rebascule systématiquement
+	 * la barre d'outils (voir syncToolbarState) : les groupes couleur/
+	 * alignement redeviennent pertinents ou non selon ce qui reste actif.
+	 */
+	private finishTextEditing(commit: boolean): void {
+		const session = this.textEditor;
+		if (!session) return;
+		this.textEditor = null;
+		session.ta.remove();
+
+		if (!commit) {
+			this.syncToolbarState();
+			return;
+		}
+
+		const text = session.ta.value;
+		const pageIndex = session.pageIndex;
+		const color = session.draft.color;
+		// Normalisé dès ici (jamais `undefined` en aval) : sans ça, un élément
+		// existant écrit avant l'ajout de ce champ (align absent) comparerait
+		// toujours `undefined !== "left"` plus bas, même quand rien n'a
+		// réellement changé — voir la comparaison juste après.
+		const align = session.draft.align ?? "left";
+
+		if (session.elementId === null) {
+			// Création : une boîte laissée vide est abandonnée, comme un clic sans
+			// glissement pour l'outil forme (voir finishShape). autoFitWidth (voir
+			// finishTextBoxCreation) : seul un simple clic sans glissement fait
+			// épouser la largeur au texte tapé, PLAFONNÉE à session.draft.width
+			// (TEXT_DEFAULT_WIDTH — jamais TEXT_MAX_WIDTH, bien plus large, sans
+			// quoi un texte qui tenait déjà sur une seule ligne à l'écran, le cas
+			// le plus courant, ne retournait jamais à la ligne à la validation) —
+			// une largeur dessinée à la souris reste, elle, fixée pour de bon.
+			if (!text.trim()) {
+				this.syncToolbarState();
+				return;
+			}
+			let width = session.draft.width;
+			let height: number;
+			if (session.autoFitWidth) {
+				({ width, height } = measureTextBoxSize(text, session.draft.size, width));
+			} else {
+				height = measureTextHeight(text, width, session.draft.size);
+			}
+			// Ne descend jamais sous la hauteur déjà affichée au tout début de
+			// cette édition (session.draft.height — elle-même déjà plancherée à
+			// la hauteur DESSINÉE pour un glissement, voir finishTextBoxCreation) :
+			// sans ce second plancher ici, une boîte glissée haute mais où l'on
+			// tape ensuite moins de texte que ce que sa hauteur dessinée
+			// suggérait s'effondrerait quand même à la validation.
+			height = Math.max(height, session.draft.height);
+			const finalEl: TextElement = { ...session.draft, text, width, height, color, align };
+			this.addManyElements(pageIndex, [finalEl]);
+			// setTool() remet returnToPenAfterDeselect à faux : l'armer APRÈS,
+			// jamais avant (même contrainte que finishShape).
+			this.setTool("select");
+			this.returnToPenAfterDeselect = true;
+			this.autoSelectShapeId = finalEl.id;
+			return;
+		}
+
+		// Édition d'une boîte existante (reclic avec l'outil texte, ou
+		// double-clic avec un autre outil — voir onPointerDown/onDoubleClick) :
+		// bascule aussi sur l'outil sélection, la boîte déjà sélectionnée.
+		const page = this.pages[pageIndex].page;
+		const original = page.elements.find((el) => el.id === session.elementId);
+		if (!original || original.type !== "text") {
+			this.syncToolbarState();
+			return; // supprimée entre-temps (undo externe, gomme...) : rien à valider
+		}
+
+		if (!text.trim()) {
+			// Vidée entièrement : supprimée, comme n'importe quel élément sélectionné.
+			this.setTool("select");
+			this.setSelection(pageIndex, [original.id]);
+			this.deleteSelection();
+			return;
+		}
+
+		if (text !== original.text || color !== original.color || align !== (original.align ?? "left")) {
+			const updated: TextElement = {
+				...original,
+				text,
+				color,
+				align,
+				height: measureTextHeight(text, original.width, original.size),
+			};
+			this.replaceElement(pageIndex, this.cloneElement(original), updated);
+		}
+		this.setTool("select");
+		this.setSelection(pageIndex, [original.id]);
+	}
+
+	/** Remplace UN élément par sa version modifiée, annulable comme n'importe quelle autre transformation (voir HistoryAction "transform") — utilisé par finishTextEditing pour l'édition d'une boîte existante. */
+	private replaceElement(pageIndex: number, before: DrawElement, after: DrawElement): void {
+		const page = this.pages[pageIndex].page;
+		const i = page.elements.findIndex((el) => el.id === before.id);
+		if (i === -1) return;
+		page.elements[i] = after;
+		this.history.push(pageIndex, { type: "transform", before: [before], after: [after] });
+		this.updateHistoryButtons();
+		this.requestSave();
+		this.render(pageIndex);
+	}
+
+	/** Double-clic sur une zone de texte existante : rouvre son édition (voir startTextEditing), quel que soit l'outil actif — sauf verrouillée, comme tout le reste de l'outil sélection. */
+	private onDoubleClick = (event: MouseEvent): void => {
+		if (this.textEditor) return; // l'événement viendrait alors du textarea lui-même, jamais du canevas
+		const rect = this.committedCanvas.getBoundingClientRect();
+		const [docX, docY] = this.screenToDocument(event.clientX - rect.left, event.clientY - rect.top);
+		const pageIndex = this.hitPage(docX, docY);
+		if (pageIndex === null) return;
+		const [x, y] = this.toPageLocal(pageIndex, docX, docY);
+		const hit = this.hitTestElementAt(pageIndex, x, y);
+		if (!hit || hit.type !== "text" || hit.locked) return;
+		event.preventDefault();
+		this.startTextEditing(pageIndex, hit, false);
+	};
 
 	// --- Gomme par zone ------------------------------------------------------------
 
@@ -5127,7 +5998,7 @@ export class DrawView extends TextFileView {
 	// --- Gomme par trait entier ------------------------------------------------------
 
 	/** Vrai si le cercle de gomme (centre + rayon) touche le rectangle (éventuellement pivoté) de `el` — image, ou forme "rectangle"/"ellipse" (width/height toujours positifs pour ces deux-là, voir ShapeElement) — en ramenant le centre dans le repère local (voir hitTestElementAt) puis en cherchant le point du rectangle le plus proche de ce centre, comme un test cercle/AABB classique. Jamais pour "line"/"arrow" (voir eraserTouchesLine) : leur width/height signé casserait ce test, qui suppose min <= max. */
-	private eraserTouchesBox(el: ImageElement | ShapeElement, cx: number, cy: number, radius: number): boolean {
+	private eraserTouchesBox(el: ImageElement | ShapeElement | TextElement, cx: number, cy: number, radius: number): boolean {
 		const local = rotatePointAround(cx, cy, el.x + el.width / 2, el.y + el.height / 2, -el.rotation);
 		const closestX = clamp(local.x, el.x, el.x + el.width);
 		const closestY = clamp(local.y, el.y, el.y + el.height);
@@ -5398,14 +6269,33 @@ export class DrawView extends TextFileView {
 		return positions;
 	}
 
-	/** screenX/screenY : coordonnées écran relatives au canvas (mêmes repère que selectionHandlePositions/pageToScreen) — jamais event.clientX/clientY bruts, voir onSelectPointerDown. */
+	/**
+	 * screenX/screenY : coordonnées écran relatives au canvas (mêmes repère
+	 * que selectionHandlePositions/pageToScreen) — jamais event.clientX/
+	 * clientY bruts, voir onSelectPointerDown. Renvoie la poignée la PLUS
+	 * PROCHE parmi celles à portée (jamais la première de RESIZE_HANDLES à
+	 * portée, comme avant) : sur un petit élément (une zone de texte tout
+	 * juste tapée, par exemple — voir TEXT_MAX_WIDTH), les poignées de coin et
+	 * de bord se retrouvent à moins de HANDLE_GRAB_RADIUS_PX les unes des
+	 * autres, et l'ordre fixe de RESIZE_HANDLES ("nw" avant "n" avant "ne"...)
+	 * faisait alors gagner systématiquement une poignée de BORD (un seul axe)
+	 * même en visant précisément un COIN (les deux) — voir le bug signalé
+	 * ("il faut d'abord agrandir en largeur, puis en hauteur, avant de pouvoir
+	 * agrandir depuis le coin").
+	 */
 	private hitTestSelectionHandle(pageIndex: number, screenX: number, screenY: number, bounds: StrokeBounds): SelectionHandle | null {
 		const positions = this.selectionHandlePositions(pageIndex, bounds);
+		let closest: SelectionHandle | null = null;
+		let closestDist = HANDLE_GRAB_RADIUS_PX;
 		for (const handle of [...RESIZE_HANDLES, "rotate" as const]) {
 			const [hx, hy] = positions[handle];
-			if (Math.hypot(screenX - hx, screenY - hy) <= HANDLE_GRAB_RADIUS_PX) return handle;
+			const dist = Math.hypot(screenX - hx, screenY - hy);
+			if (dist <= closestDist) {
+				closestDist = dist;
+				closest = handle;
+			}
 		}
-		return null;
+		return closest;
 	}
 
 	/** Clonage profond (pas une simple copie de référence) : les transformations ne doivent jamais muter l'objet d'origine, ni le clone du "before" d'une action d'historique — voir le commentaire sur l'immutabilité des traits dans render.ts:strokeBounds. */
@@ -5740,7 +6630,14 @@ export class DrawView extends TextFileView {
 			y: ny,
 			width: Math.max(2, el.width * Math.abs(sx)),
 			height: Math.max(2, el.height * Math.abs(sy)),
-			...(el.type === "shape" ? { size: Math.max(0.5, el.size * sizeScale) } : {}),
+			// Une image n'a ni couleur ni épaisseur de contour (voir ImageElement,
+			// model.ts) : rien à mettre à l'échelle pour elle ici. Une forme
+			// (contour) et une zone de texte (police, voir TextElement.size,
+			// converti en taille réelle par render.ts:textFontSize) ont toutes
+			// deux un `size` de base à faire suivre le redimensionnement — sans
+			// ça, un texte agrandi via une poignée garderait sa police d'origine,
+			// minuscule dans une boîte devenue grande.
+			...(el.type === "shape" || el.type === "text" ? { size: Math.max(0.5, el.size * sizeScale) } : {}),
 		};
 	}
 
@@ -5976,17 +6873,41 @@ export class DrawView extends TextFileView {
 		this.render(pageIndex);
 	}
 
+	/**
+	 * Une flèche déplace la sélection courante si une sélection déplaçable
+	 * existe (voir nudgeSelection) ; sinon, elle fait défiler la vue à la
+	 * place — comme dans n'importe quel lecteur de document, jamais un
+	 * appui sans effet. `dx`/`dy` valent -1/0/1 (voir les quatre
+	 * enregistrements de touche ci-dessus) : direction commune aux deux
+	 * usages, seule leur échelle diffère (unités de page pour nudgeSelection,
+	 * pixels écran — indépendants du zoom, comme Viewport.offsetX/offsetY —
+	 * pour le défilement).
+	 */
 	private handleSelectionNudgeKey(evt: KeyboardEvent, dx: number, dy: number): false | undefined {
-		if (!isSelectionTool(this.plugin.settings.tool) || this.selectedIds.size === 0) return;
-		if (!this.isSelectionTransformable()) return; // élément verrouillé : les flèches ne le déplacent pas (voir isSelectionTransformable)
+		if (this.isTypingInField()) return; // les flèches déplacent le curseur de saisie dans un champ de texte, jamais la sélection ni la vue
 		evt.preventDefault();
-		const step = evt.shiftKey ? SELECTION_NUDGE_FAST_PX : SELECTION_NUDGE_PX;
-		this.nudgeSelection(dx * step, dy * step);
+
+		if (isSelectionTool(this.plugin.settings.tool) && this.selectedIds.size > 0 && this.isSelectionTransformable()) {
+			const step = evt.shiftKey ? SELECTION_NUDGE_FAST_PX : SELECTION_NUDGE_PX;
+			this.nudgeSelection(dx * step, dy * step);
+			return false;
+		}
+
+		// Pas de sélection déplaçable (rien de sélectionné, élément verrouillé,
+		// ou outil de dessin actif) : les flèches font défiler la vue, comme la
+		// molette (voir onWheel) — même signe (soustrait de l'offset courant),
+		// pour un sens de défilement identique aux deux.
+		const step = evt.shiftKey ? ARROW_SCROLL_STEP_FAST_PX : ARROW_SCROLL_STEP_PX;
+		this.viewport.offsetX -= dx * step;
+		this.viewport.offsetY -= dy * step;
+		this.onViewportChanged();
 		return false;
 	}
 
-	/** Couleur/épaisseur (voir recolorSelection/resizeSelectionThickness) : les deux seuls types qui ont ces champs sont les traits ET les formes (voir ShapeElement, model.ts) — une image n'a ni couleur ni épaisseur de contour, jamais concernée ici. */
-	private transformSelectedColorable(fn: (s: StrokeElement | ShapeElement) => StrokeElement | ShapeElement): void {
+	/** Couleur/épaisseur (voir recolorSelection/resizeSelectionThickness) : les trois types qui ont ces champs sont les traits, les formes ET les zones de texte (voir ShapeElement/TextElement, model.ts) — une image n'a ni couleur ni épaisseur de contour, jamais concernée ici. */
+	private transformSelectedColorable(
+		fn: (s: StrokeElement | ShapeElement | TextElement) => StrokeElement | ShapeElement | TextElement
+	): void {
 		if (this.selectedPageIndex === null) return;
 		const pageIndex = this.selectedPageIndex;
 		const page = this.pages[pageIndex].page;
@@ -5994,7 +6915,7 @@ export class DrawView extends TextFileView {
 		const after: DrawElement[] = [];
 		for (let i = 0; i < page.elements.length; i++) {
 			const el = page.elements[i];
-			if (!this.selectedIds.has(el.id) || (el.type !== "stroke" && el.type !== "shape")) continue;
+			if (!this.selectedIds.has(el.id) || (el.type !== "stroke" && el.type !== "shape" && el.type !== "text")) continue;
 			before.push(this.cloneElement(el));
 			const updated = fn(el);
 			page.elements[i] = updated;
@@ -6137,11 +7058,12 @@ export class DrawView extends TextFileView {
 		this.render(pageIndex);
 	}
 
-	private bringSelectionToFront(): void {
+	/** Publique : aussi appelée depuis main.ts par les commandes de premier/arrière-plan (voir onload) — sans effet si rien n'est sélectionné (voir reorderSelection), donc rien à vérifier de plus côté commande. */
+	bringSelectionToFront(): void {
 		this.reorderSelection((selected, rest) => [...rest, ...selected]);
 	}
 
-	private sendSelectionToBack(): void {
+	sendSelectionToBack(): void {
 		this.reorderSelection((selected, rest) => [...selected, ...rest]);
 	}
 

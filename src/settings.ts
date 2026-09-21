@@ -1,6 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type QuillStonePlugin from "./main";
-import { BackgroundKind, Density, Orientation, PaperFormat, ShapeKind } from "./model";
+import { BackgroundKind, Density, Orientation, PaperFormat, ShapeKind, TextAlign } from "./model";
 import { openColorPicker } from "./colorPicker";
 
 /**
@@ -23,7 +23,10 @@ import { openColorPicker } from "./colorPicker";
  * existants pour les sélectionner : il rasterise tout ce qu'il y a sous ce
  * rectangle (fond de page compris) en une nouvelle image, posée
  * immédiatement au même endroit — comme une capture d'écran collée sur la
- * feuille (voir DrawView.finishCapture).
+ * feuille (voir DrawView.finishCapture). "text" pose une zone de texte
+ * éditable au clavier à l'endroit cliqué (voir DrawView.startTextCreation) —
+ * même couleur active que le stylo (DrawView.activeColorTool), comme les
+ * formes prédéfinies.
  */
 export type ActiveTool =
 	| "pen"
@@ -35,7 +38,8 @@ export type ActiveTool =
 	| "capture"
 	| ShapeKind
 	| "laser"
-	| "hand";
+	| "hand"
+	| "text";
 
 /** Les trois outils qu'on choisirait raisonnablement comme point de départ à l'ouverture d'une feuille — pas les gommes, qui n'ont de sens qu'en cours de travail. Voir QuillStoneSettings.defaultTool. */
 export type DefaultTool = "pen" | "cursor" | "select";
@@ -146,6 +150,8 @@ export interface QuillStoneSettings {
 	defaultTool: DefaultTool;
 	colors: ToolColorSettings;
 	size: number;
+	/** Alignement appliqué à une NOUVELLE zone de texte (voir DrawView.startTextCreation) — le dernier choisi dans la barre d'outils, comme `size`/`colors` pour le stylo. Une zone déjà posée garde le sien propre (TextElement.align), jamais mis à jour rétroactivement par un changement de ce réglage. */
+	textAlign: TextAlign;
 	/**
 	 * Réordonne le rendu pour que les surligneurs passent toujours sous le
 	 * stylo, quel que soit l'ordre de création. Désactivé par défaut : l'ordre
@@ -212,6 +218,7 @@ export const DEFAULT_SETTINGS: QuillStoneSettings = {
 		},
 	},
 	size: 4,
+	textAlign: "left",
 	highlighterAlwaysBehind: false,
 	paperAlwaysLight: true,
 	defaultBackground: "grid",

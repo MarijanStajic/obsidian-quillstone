@@ -1,5 +1,6 @@
 import {
 	Editor,
+	Hotkey,
 	MarkdownFileInfo,
 	MarkdownPostProcessorContext,
 	MarkdownView,
@@ -14,7 +15,7 @@ import {
 } from "obsidian";
 import { DrawView, VIEW_TYPE_DRAW } from "./view";
 import { Drawing, DrawingPage, createEmptyDrawing, newPdfSourceId, newStrokeId, serialize } from "./model";
-import { DEFAULT_SETTINGS, QuillStoneSettingTab, QuillStoneSettings, mergeSettings } from "./settings";
+import { ActiveTool, DEFAULT_SETTINGS, QuillStoneSettingTab, QuillStoneSettings, mergeSettings } from "./settings";
 import { DrawPreviewManager, parseEmbedWidth } from "./preview";
 import { DrawEmbedLifecycle } from "./previewLifecycle";
 import { configurePdfWorker, getPdfPageSize, loadPdfDocument } from "./pdf";
@@ -136,6 +137,42 @@ export default class QuillStonePlugin extends Plugin {
 			callback: () => void this.importPdfAsDrawing(null),
 		});
 
+		// 4bis. Changement d'outil, comme commandes Obsidian ORDINAIRES (comme
+		// insert-drawing ci-dessus) — visibles dans la palette de commandes et
+		// réassignables depuis Paramètres > Raccourcis clavier, comme demandé.
+		// SANS raccourci par défaut ici, volontairement : le comportement
+		// D'ORIGINE de ces touches (P, M, T, E, D, H, C, L) est géré par le
+		// Scope de la vue elle-même (voir DrawView.onOpen, TOOL_SHORTCUTS), qui
+		// reste seul maître de preventDefault() — le système de hotkeys
+		// d'Obsidian s'est révélé consommer la frappe MÊME quand checkCallback
+		// refuse d'agir, rendant alors purement et simplement impossible
+		// d'écrire "p"/"e"/"t"... dans une zone de texte ou le champ
+		// hexadécimal du sélecteur de couleur (voir le bug signalé). Assigner
+		// un raccourci à l'une de ces commandes reste possible depuis les
+		// réglages, mais c'est alors un choix explicite de l'utilisateur, qui
+		// en accepte la même limite.
+		this.addToolCommand("tool-pen", "Pen tool", "pen");
+		this.addToolCommand("tool-highlighter", "Highlighter tool", "highlighter");
+		this.addToolCommand("tool-text", "Text tool", "text");
+		this.addToolCommand("tool-eraser-zone", "Eraser (zone) tool", "eraser-zone");
+		this.addToolCommand("tool-eraser-stroke", "Eraser (whole stroke) tool", "eraser-stroke");
+		this.addToolCommand("tool-hand", "Hand tool", "hand");
+		this.addToolCommand("tool-cursor", "Cursor tool", "cursor");
+		this.addToolCommand("tool-lasso", "Lasso tool", "select");
+
+		this.addDrawViewCommand(
+			"bring-selection-to-front",
+			"Bring selection to front",
+			(view) => view.bringSelectionToFront(),
+			{ modifiers: ["Mod", "Shift"], key: "]" }
+		);
+		this.addDrawViewCommand(
+			"send-selection-to-back",
+			"Send selection to back",
+			(view) => view.sendSelectionToBack(),
+			{ modifiers: ["Mod", "Shift"], key: "[" }
+		);
+
 		// 5. Aperçu intégré ![[feuille.draw]] : Obsidian crée un élément
 		//    d'intégration pour cette syntaxe dans les deux modes (Lecture et
 		//    Live Preview), avec l'icône de fichier générique et le nom du lien
@@ -176,6 +213,45 @@ export default class QuillStonePlugin extends Plugin {
 		this.embedObserver?.disconnect();
 		this.embedObserver = null;
 		this.preview?.clear();
+	}
+
+	/**
+	 * Une commande qui agit sur la DrawView actuellement active, quand il y en
+	 * a une — le `checkCallback` la désactive proprement (grisée dans la
+	 * palette, sans effet au raccourci) hors d'une feuille de dessin, plutôt
+	 * que d'échouer silencieusement ou de lever une exception. Partagée par
+	 * addToolCommand (changement d'outil) et les commandes de premier/
+	 * arrière-plan (voir onload) : les deux n'ont besoin que d'une DrawView,
+	 * rien de plus à vérifier.
+	 */
+	private addDrawViewCommand(
+		id: string,
+		name: string,
+		run: (view: DrawView) => void,
+		hotkey?: Hotkey
+	): void {
+		this.addCommand({
+			id,
+			name,
+			hotkeys: hotkey ? [hotkey] : undefined,
+			checkCallback: (checking) => {
+				const view = this.app.workspace.getActiveViewOfType(DrawView);
+				// isTypingInField() : ces commandes n'ont plus de Scope à elles pour
+				// s'effacer devant la frappe (voir DrawView.isTypingInField, dont la
+				// doc explique pourquoi c'est encore nécessaire ici) — sans ce
+				// contrôle, taper "p"/"e"/"t"... dans une zone de texte ou le champ
+				// hexadécimal du sélecteur de couleur changeait d'outil à chaque
+				// lettre au lieu d'écrire (voir le bug signalé).
+				if (!view || view.isTypingInField()) return false;
+				if (!checking) run(view);
+				return true;
+			},
+		});
+	}
+
+	/** Une commande qui bascule la DrawView active sur `tool` — voir addDrawViewCommand, dont elle n'est qu'un raccourci d'écriture pour le cas le plus courant. */
+	private addToolCommand(id: string, name: string, tool: ActiveTool, hotkey?: Hotkey): void {
+		this.addDrawViewCommand(id, name, (view) => view.setTool(tool), hotkey);
 	}
 
 	/**

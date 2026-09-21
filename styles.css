@@ -74,6 +74,29 @@
 }
 
 /*
+ * Zone de saisie d'une zone de texte en cours d'édition (voir
+ * DrawView.startTextEditing) : un vrai <textarea>, positionné/dimensionné en
+ * JS pour se superposer exactement à l'élément qu'il édite. Sans bordure ni
+ * fond propres tant qu'on ne le touche pas, pour rester fidèle au rendu final
+ * (voir render.ts:drawTextElement) — seul un cadre discret au survol/focus
+ * distingue la zone éditable du texte déjà posé sur la feuille.
+ */
+.quillstone-text-editor {
+	position: absolute;
+	box-sizing: border-box;
+	background: transparent;
+	border: 1px dashed var(--interactive-accent);
+	border-radius: 2px;
+	outline: none;
+	resize: none;
+	overflow: hidden;
+	font-family: sans-serif;
+	white-space: pre-wrap;
+	word-break: break-word;
+	z-index: 3;
+}
+
+/*
  * Bouton rond « + » : un par page, toujours centré dans l'interstice sous
  * elle (voir DrawView.addPageBtns/syncAddPageButtons), y compris sous la
  * toute dernière — repositionné à chaque redessin du volet, jamais fixe dans
@@ -152,6 +175,38 @@
 
 .quillstone-page-move-btn:active {
 	cursor: grabbing;
+}
+
+/*
+ * Barre de défilement verticale custom (voir DrawView.updateScrollbar) :
+ * couvre toute la hauteur du volet pour que sa hauteur en pixels corresponde
+ * directement à celle utilisée par verticalOffsetRange, sans second calcul à
+ * réconcilier. Masquée (voir updateScrollbar) dès qu'il n'y a qu'une seule
+ * page ou que tout le document tient déjà dans le volet.
+ */
+.quillstone-scrollbar-track {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	right: 2px;
+	width: 10px;
+	z-index: 2;
+	touch-action: none;
+}
+
+.quillstone-scrollbar-thumb {
+	position: absolute;
+	left: 0;
+	width: 100%;
+	border-radius: 5px;
+	background-color: var(--scrollbar-thumb-bg, var(--background-modifier-border));
+	cursor: default;
+	touch-action: none;
+}
+
+.quillstone-scrollbar-thumb:hover,
+.quillstone-scrollbar-thumb:active {
+	background-color: var(--scrollbar-active-thumb-bg, var(--interactive-accent));
 }
 
 /* Barre d'outils : collée en haut du volet, au-dessus du canvas, visible même

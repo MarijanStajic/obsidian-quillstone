@@ -149,8 +149,50 @@ export interface ShapeElement {
 	size: number;
 }
 
+/** Alignement horizontal du texte à l'intérieur de sa boîte — voir TextElement.align, render.ts:drawTextElement. "justify" étire chaque ligne pour remplir toute la largeur en espaçant ses mots, SAUF la dernière ligne d'un paragraphe (retour à la ligne saisi par l'utilisateur, ou toute dernière ligne du texte) — comme dans n'importe quel traitement de texte, jamais la dernière ligne d'un bloc justifié. */
+export type TextAlign = "left" | "center" | "right" | "justify";
+
+/**
+ * Une zone de texte tapée au clavier, posée sur la feuille — voir
+ * view.ts:startTextCreation (outil "text", clic ou glissement) et
+ * startTextEditing (reclic avec l'outil texte, ou double-clic avec un autre
+ * outil, pour rouvrir l'édition d'une zone existante). Partage x/y/width/
+ * height/rotation/locked avec ImageElement (même comportement générique de
+ * déplacement/redimensionnement/rotation/verrouillage dans view.ts, sans code
+ * dédié) et color/size avec ShapeElement (size est une taille de base, comme
+ * Stroke.size/ShapeElement.size — voir render.ts:textFontSize pour sa
+ * conversion en taille de police réelle).
+ *
+ * `width` fixe la largeur de retour à la ligne : un simple CLIC choisit un
+ * texte qui épouse sa propre largeur (voir render.ts:measureTextBoxSize),
+ * tandis qu'un CLIC-GLISSÉ fige `width` à la taille dessinée, comme une forme
+ * — voir view.ts:finishTextBoxCreation, seul endroit qui distingue les deux.
+ * `height`, elle, est TOUJOURS recalculée à chaque modification du texte
+ * (voir render.ts:measureTextHeight), jamais ajustée manuellement par
+ * l'utilisateur au-delà de ce que la saisie impose à une largeur donnée — un
+ * redimensionnement manuel ultérieur (poignées de l'outil sélection) change
+ * `width` comme n'importe quel élément, ce qui fait à son tour changer le
+ * retour à la ligne au prochain rendu.
+ */
+export interface TextElement {
+	id: string;
+	type: "text";
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	rotation: number;
+	color: string;
+	size: number;
+	text: string;
+	/** Absent équivaut à "left" (voir render.ts) — jamais réinitialisé à la relecture d'un .draw écrit par une version antérieure du plugin, qui n'avait pas ce champ. */
+	align?: TextAlign;
+	/** Verrouillé par l'outil sélection — même comportement que StrokeElement.locked/ImageElement.locked. */
+	locked?: boolean;
+}
+
 /** Tout ce qu'une page peut contenir, dans l'ordre chronologique de création — voir DrawingPage.elements. */
-export type DrawElement = StrokeElement | ImageElement | ShapeElement;
+export type DrawElement = StrokeElement | ImageElement | ShapeElement | TextElement;
 
 /**
  * Une page d'un document .draw. Chaque page a ses propres dimensions, fond,

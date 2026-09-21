@@ -1,4 +1,4 @@
-import { BackgroundKind, DrawElement, Density, DrawingPage, ImageElement, Pt, ShapeElement, Stroke, StrokeElement, newStrokeId } from "./model";
+import { BackgroundKind, DrawElement, Density, DrawingPage, ImageElement, Pt, ShapeElement, Stroke, StrokeElement, TextAlign, TextElement, newStrokeId } from "./model";
 
 /**
  * Rendu d'une feuille sur un contexte 2D.
@@ -692,6 +692,230 @@ function drawShapeElement(ctx: CanvasRenderingContext2D, el: ShapeElement): void
 	ctx.restore();
 }
 
+// --- Zone de texte -----------------------------------------------------------
+
+/** TextElement.size (2/4/8, comme Stroke.size/ShapeElement.size) -> taille de police réelle en pixels logiques — un peu plus généreux qu'une simple épaisseur de trait (voir le bug signalé : un texte à l'épaisseur par défaut du stylo paraissait trop petit à l'écriture). */
+const TEXT_FONT_SCALE = 7;
+/** Exportée : view.ts applique le même interligne au textarea d'édition, pour que la zone éditée corresponde visuellement au rendu final une fois validée. */
+export const TEXT_LINE_HEIGHT_RATIO = 1.3;
+/**
+ * Aucune marge interne entre le cadre de la zone de texte et le texte
+ * lui-même : le cadre — donc le cadre de sélection affiché par l'outil
+ * sélection, voir computeElementBounds — doit épouser le texte au pixel
+ * près, jamais laisser de marge vide tout autour (voir le bug signalé).
+ */
+export const TEXT_PADDING_PX = 0;
+/** Largeur (pixels logiques) au-delà de laquelle une zone de texte fraîchement créée (voir view.ts:startTextCreation/finishTextEditing) retourne à la ligne plutôt que de continuer à s'élargir — un texte redimensionné ensuite à la main peut dépasser cette largeur, elle ne s'applique qu'au calcul automatique. */
+export const TEXT_MAX_WIDTH = 480;
+const TEXT_FONT_FAMILY = "sans-serif";
+
+export function textFontSize(size: number): number {
+	return size * TEXT_FONT_SCALE;
+}
+
+function textFont(size: number): string {
+	return `${textFontSize(size)}px ${TEXT_FONT_FAMILY}`;
+}
+
+/** Canvas hors écran dédié à la mesure de texte (ctx.measureText) — jamais affiché, comme colorProbe ci-dessus pour une raison différente (ici, avoir un contexte 2D disponible même hors de tout rendu en cours). */
+let textMeasureCanvas: HTMLCanvasElement | null = null;
+
+function textMeasureCtx(): CanvasRenderingContext2D | null {
+	if (!textMeasureCanvas) textMeasureCanvas = document.createElement("canvas");
+	return textMeasureCanvas.getContext("2d");
+}
+
+/**
+ * Une ligne déjà retournée à la largeur voulue (voir wrapTextLines).
+ * `lastOfParagraph` distingue la toute dernière ligne d'un paragraphe (un
+ * retour à la ligne saisi par l'utilisateur, ou la fin du texte) d'une ligne
+ * coupée seulement parce qu'elle débordait — seule la première ne doit
+ * JAMAIS être justifiée (voir TextAlign, model.ts, et drawTextElement),
+ * comme dans n'importe quel traitement de texte : une dernière ligne étirée
+ * pour remplir toute la largeur, même à un seul mot, aurait l'air cassée.
+ */
+export interface WrappedLine {
+	text: string;
+	lastOfParagraph: boolean;
+}
+
+/**
+ * Découpe `text` en lignes qui tiennent dans `maxWidth`, en respectant
+ * d'abord les retours à la ligne saisis par l'utilisateur (chaque paragraphe
+ * est ensuite retourné à la ligne indépendamment des autres), puis en coupant
+ * mot par mot — jamais au milieu d'un mot ORDINAIRE, comme un traitement de
+ * texte classique. Un mot à lui seul plus large que `maxWidth` (une longue
+ * URL sans espace, par exemple — ou une chaîne de test sans espace du tout,
+ * voir le bug signalé) est la SEULE exception : il est alors décomposé
+ * caractère par caractère, comme le ferait nativement le textarea d'édition
+ * (CSS `word-break: break-word`, voir styles.css) — sans cette exception, un
+ * tel mot débordait silencieusement de sa boîte sans jamais retourner à la
+ * ligne, alors même que l'édition en cours (elle, wrap nativement dans le
+ * navigateur) laissait croire que tout fonctionnait. Utilisée à la fois pour
+ * le rendu (drawTextElement) et pour calculer la hauteur d'une zone de texte
+ * (measureTextHeight) : les deux doivent toujours s'accorder, sans quoi la
+ * boîte affichée ne correspondrait plus au texte qu'elle contient.
+ */
+export function wrapTextLines(text: string, maxWidth: number, size: number): WrappedLine[] {
+	const ctx = textMeasureCtx();
+	if (!ctx) return text.split("\n").map((line) => ({ text: line, lastOfParagraph: true }));
+	ctx.font = textFont(size);
+
+	const lines: WrappedLine[] = [];
+	for (const paragraph of text.split("\n")) {
+		if (paragraph === "") {
+			lines.push({ text: "", lastOfParagraph: true });
+			continue;
+		}
+		let current = "";
+		for (const word of paragraph.split(" ")) {
+			const candidate = current ? `${current} ${word}` : word;
+			if (ctx.measureText(candidate).width <= maxWidth) {
+				current = candidate;
+				continue;
+			}
+
+			// `candidate` déborde : la ligne en cours (s'il y en avait une) est
+			// complète telle quelle.
+			if (current) {
+				lines.push({ text: current, lastOfParagraph: false });
+				current = "";
+			}
+
+			if (ctx.measureText(word).width <= maxWidth) {
+				current = word;
+				continue;
+			}
+
+			// `word` seul dépasse encore maxWidth, même sur une ligne vide :
+			// aucun espace à exploiter, on le décompose caractère par
+			// caractère (voir la doc de la fonction).
+			let chunk = "";
+			for (const ch of word) {
+				const withCh = chunk + ch;
+				if (chunk && ctx.measureText(withCh).width > maxWidth) {
+					lines.push({ text: chunk, lastOfParagraph: false });
+					chunk = ch;
+				} else {
+					chunk = withCh;
+				}
+			}
+			current = chunk;
+		}
+		lines.push({ text: current, lastOfParagraph: true });
+	}
+	return lines;
+}
+
+/**
+ * Hauteur totale (pixels logiques, marges internes comprises) qu'il faut à
+ * `text` pour tenir sur une largeur `width` — c'est cette valeur qui devient
+ * TextElement.height à chaque modification du texte (voir view.ts), jamais
+ * une valeur choisie à la main par l'utilisateur.
+ */
+export function measureTextHeight(text: string, width: number, size: number): number {
+	const lines = wrapTextLines(text, Math.max(1, width - TEXT_PADDING_PX * 2), size);
+	const lineHeight = textFontSize(size) * TEXT_LINE_HEIGHT_RATIO;
+	return lines.length * lineHeight + TEXT_PADDING_PX * 2;
+}
+
+/**
+ * Largeur/hauteur qui épousent exactement `text` — utilisée uniquement pour
+ * un simple CLIC de l'outil texte (voir view.ts:finishTextBoxCreation) pour
+ * qu'une boîte fraîchement tapée sans glissement ne laisse jamais de vide
+ * entre son cadre (donc son cadre de sélection) et le texte, ni sur sa
+ * largeur ni sur sa hauteur : `width` est la plus longue ligne UNE FOIS le
+ * retour à la ligne appliqué à `maxWidth` (voir wrapTextLines), jamais
+ * `maxWidth` lui-même. Sans effet sur une boîte créée par CLIC-GLISSÉ (sa
+ * largeur reste celle dessinée) ni sur une boîte existante qu'on rouvre pour
+ * la modifier : dans les deux cas, seule measureTextHeight recalcule la
+ * hauteur à une largeur déjà fixée.
+ */
+export function measureTextBoxSize(text: string, size: number, maxWidth: number = TEXT_MAX_WIDTH): { width: number; height: number } {
+	const lines = wrapTextLines(text, maxWidth, size);
+	const lineHeight = textFontSize(size) * TEXT_LINE_HEIGHT_RATIO;
+	const ctx = textMeasureCtx();
+	let width = textFontSize(size); // jamais plus étroite qu'un caractère, pour une boîte tout juste créée sans texte
+	if (ctx) {
+		ctx.font = textFont(size);
+		for (const line of lines) width = Math.max(width, ctx.measureText(line.text).width);
+	} else {
+		width = maxWidth;
+	}
+	return { width, height: lines.length * lineHeight };
+}
+
+/** Position X (repère local, avant justification) d'une ligne de largeur `lineWidth` dans une boîte de largeur `boxWidth` — "justify" partage l'alignement à gauche de "left" (drawJustifiedLine gère elle-même la répartition), seuls "center"/"right" ont une position propre. */
+function alignedLineX(lineWidth: number, boxWidth: number, align: TextAlign): number {
+	if (align === "center") return (boxWidth - lineWidth) / 2;
+	if (align === "right") return boxWidth - lineWidth - TEXT_PADDING_PX;
+	return TEXT_PADDING_PX;
+}
+
+/**
+ * Une ligne "justify" : répartit l'espace EN TROP (largeur disponible moins
+ * la somme des mots déjà espacés d'un espace normal) à parts égales entre
+ * chaque mot, en redessinant mot par mot plutôt qu'avec un seul fillText —
+ * ctx.fillText n'a aucun moyen natif d'étirer les espaces d'une chaîne. Un
+ * seul mot (rien à répartir entre deux mots) retombe simplement sur un rendu
+ * aligné à gauche.
+ */
+function drawJustifiedLine(ctx: CanvasRenderingContext2D, line: string, y: number, boxWidth: number): void {
+	const words = line.split(" ").filter((w) => w.length > 0);
+	if (words.length <= 1) {
+		ctx.fillText(line, TEXT_PADDING_PX, y);
+		return;
+	}
+	const wordWidths = words.map((w) => ctx.measureText(w).width);
+	const totalWordWidth = wordWidths.reduce((sum, w) => sum + w, 0);
+	const availableWidth = Math.max(0, boxWidth - TEXT_PADDING_PX * 2);
+	const gap = Math.max(0, (availableWidth - totalWordWidth) / (words.length - 1));
+	let x = TEXT_PADDING_PX;
+	words.forEach((word, i) => {
+		ctx.fillText(word, x, y);
+		x += wordWidths[i] + gap;
+	});
+}
+
+/**
+ * Une zone de texte (voir TextElement, model.ts) : repère local comme
+ * drawImageElement/drawShapeElement, coupé au cadre (jamais débordant sur le
+ * reste de la page, même si measureTextHeight n'a pas encore été réappliquée
+ * après une modification externe — un redimensionnement manuel de la boîte,
+ * par exemple). L'alignement (TextElement.align, absent équivaut à "left")
+ * ne change jamais le découpage en lignes (wrapTextLines) — seulement où
+ * chaque ligne déjà calculée atterrit sur l'axe horizontal.
+ */
+function drawTextElement(ctx: CanvasRenderingContext2D, el: TextElement): void {
+	ctx.save();
+	ctx.translate(el.x + el.width / 2, el.y + el.height / 2);
+	ctx.rotate((el.rotation * Math.PI) / 180);
+	ctx.translate(-el.width / 2, -el.height / 2);
+
+	ctx.beginPath();
+	ctx.rect(0, 0, el.width, el.height);
+	ctx.clip();
+
+	ctx.fillStyle = el.color;
+	ctx.font = textFont(el.size);
+	ctx.textBaseline = "top";
+	const align = el.align ?? "left";
+	const lineHeight = textFontSize(el.size) * TEXT_LINE_HEIGHT_RATIO;
+	const lines = wrapTextLines(el.text, Math.max(1, el.width - TEXT_PADDING_PX * 2), el.size);
+	let y = TEXT_PADDING_PX;
+	for (const line of lines) {
+		if (align === "justify" && !line.lastOfParagraph) {
+			drawJustifiedLine(ctx, line.text, y, el.width);
+		} else {
+			const lineWidth = ctx.measureText(line.text).width;
+			ctx.fillText(line.text, alignedLineX(lineWidth, el.width, align), y);
+		}
+		y += lineHeight;
+	}
+
+	ctx.restore();
+}
+
 /**
  * Seul et unique endroit où l'ordre d'empilement des éléments est décidé.
  *
@@ -780,6 +1004,8 @@ export function drawElement(
 		drawImageElement(ctx, el, resolution);
 	} else if (el.type === "shape") {
 		drawShapeElement(ctx, el);
+	} else if (el.type === "text") {
+		drawTextElement(ctx, el);
 	} else if (el.tool === "highlighter") {
 		drawHighlighterStroke(ctx, el, pageWidth, pageHeight, paperColor);
 	} else {
