@@ -4078,7 +4078,7 @@ export class DrawView extends TextFileView {
 	private applyLiveTextColor(tool: ColorableTool, color: string): void {
 		if (!this.textEditor || tool !== this.activeColorTool) return;
 		this.textEditor.draft.color = color;
-		this.textEditor.ta.style.color = color;
+		this.textEditor.ta.setCssStyles({ color });
 	}
 
 	/**
@@ -4211,7 +4211,7 @@ export class DrawView extends TextFileView {
 	private setTextAlign(align: TextAlign): void {
 		if (!this.textEditor) return;
 		this.textEditor.draft.align = align;
-		this.textEditor.ta.style.textAlign = align;
+		this.textEditor.ta.setCssStyles({ textAlign: align });
 		this.syncTextAlignToolbar();
 	}
 
@@ -5949,8 +5949,8 @@ export class DrawView extends TextFileView {
 			// measureTextHeight (voir finishTextEditing), pas de scrollHeight :
 			// les deux s'accordent de très près (même police, même marge
 			// interne) sans avoir besoin d'être identiques au pixel près.
-			ta.style.height = "auto";
-			ta.style.height = `${ta.scrollHeight}px`;
+			ta.setCssStyles({ height: "auto" });
+			ta.setCssStyles({ height: `${ta.scrollHeight}px` });
 		});
 		ta.addEventListener("blur", () => this.finishTextEditing(true));
 		ta.addEventListener("keydown", (evt) => {
@@ -5967,8 +5967,8 @@ export class DrawView extends TextFileView {
 		window.requestAnimationFrame(() => {
 			ta.focus();
 			if (!isNew) ta.select();
-			ta.style.height = "auto";
-			ta.style.height = `${ta.scrollHeight}px`;
+			ta.setCssStyles({ height: "auto" });
+			ta.setCssStyles({ height: `${ta.scrollHeight}px` });
 		});
 
 		// Groupes couleur/alignement de la barre d'outils : pertinents dès
