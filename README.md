@@ -5,7 +5,7 @@ Handwritten sheets for [Obsidian](https://obsidian.md): draw with a stylus or mo
 ## Features
 
 - **Freehand drawing** — pen and highlighter, with pencil-pressure sensitivity and adjustable size.
-- **Shapes** — rectangle, ellipse, triangle, line, and arrow, drawn by dragging or auto-recognized from a held freehand stroke.
+- **Shapes** — rectangle, ellipse, triangle, line, and arrow, drawn by dragging with the shape palette. Holding a freehand stroke still also auto-recognizes it: closed loops become a clean circle, square/rectangle, equilateral or isosceles triangle, star, or regular/irregular polygon; open strokes with a bend (a chevron, an angled arrow, a zigzag) become a clean multi-segment line.
 - **Text boxes** — click with the text tool for a box that hugs what you type, or drag out a specific width to control wrapping; text alignment (left/center/right/justify). Click an existing box with the text tool (or double-click with any other tool) to edit its text, color, and alignment again.
 - **Eraser** — by stroke or by zone.
 - **Selection tool** — move, resize, rotate, recolor, restack, duplicate, cut/copy/paste (including across sheets and pages), lock elements in place.

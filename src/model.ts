@@ -112,27 +112,46 @@ export interface ImageElement {
 	crop?: { x: number; y: number; width: number; height: number };
 }
 
-/** Les formes prédéfinies de la palette (voir view.ts) — le carré et le rond n'ont pas leur propre valeur : ce sont un rectangle, respectivement une ellipse, tracés avec Maj maintenue (rapport 1:1), comme le redimensionnement d'une sélection le fait déjà ailleurs dans le plugin. "triangle" est isocèle par convention dans son rectangle englobant (sommet en haut au centre, base en bas) — un triangle reconnu par tracé à main levée (voir view.ts:recognizeClosedShape) n'a jamais ses trois sommets réels conservés, seulement sa boîte englobante. */
-export type ShapeKind = "rectangle" | "ellipse" | "triangle" | "line" | "arrow";
+/**
+ * Les formes prédéfinies de la palette (voir view.ts) — le carré et le rond
+ * n'ont pas leur propre valeur : ce sont un rectangle, respectivement une
+ * ellipse, tracés avec Maj maintenue (rapport 1:1), comme le
+ * redimensionnement d'une sélection le fait déjà ailleurs dans le plugin.
+ * "triangle" est TOUJOURS isocèle par convention dans son rectangle
+ * englobant (sommet en haut au centre, base en bas), jamais pivoté : un
+ * triangle reconnu à main levée comme équilatéral (voir
+ * view.ts:recognizeClosedShape) devient un "polygon" à 3 sommets réels
+ * plutôt que ce gabarit, justement pour pouvoir retrouver l'orientation
+ * réellement dessinée (l'englobante d'un triangle pivoté n'est PAS centrée
+ * sur son centroïde, un premier essai qui pivotait ce gabarit isocèle
+ * produisait une orientation fausse). "polygon"/"polyline" n'existent QUE
+ * reconnues à main levée (jamais dans la palette de formes) : voir
+ * ShapeElement.vertices, qui porte leurs sommets réels — n'importe quel
+ * contour à coins nets (étoile, pentagone, triangle équilatéral, flèche en
+ * chevron, zigzag...) que "rectangle"/"ellipse"/"triangle" ne peuvent pas
+ * représenter.
+ */
+export type ShapeKind = "rectangle" | "ellipse" | "triangle" | "line" | "arrow" | "polygon" | "polyline";
 
 /**
  * Une forme prédéfinie, tracée par glissement avec la palette de formes OU
  * reconnue automatiquement à partir d'un tracé au stylo/surligneur maintenu
  * immobile (voir view.ts, respectivement l'outil forme et
- * recognizeClosedShape). `x`/`y`/`width`/`height`/`rotation` fonctionnent
- * comme pour ImageElement — un rectangle englobant avant rotation, pivoté
- * autour de son centre — SAUF pour "line"/"arrow" : `width`/`height`
- * PEUVENT être négatifs pour ces deux formes, le trait allant du point
- * (x, y) au point (x + width, y + height). C'est ce signe qui encode leur
- * direction, jamais `rotation` seule (qui reste disponible en plus, pour
- * une rotation ultérieure via la poignée de sélection) — contrairement à
- * "rectangle"/"ellipse"/"triangle", où width/height restent toujours
- * positifs comme pour une image. Cette différence est ce qui distingue leur
- * code dans scaleElement/hitTestElementAt/etc. (voir view.ts) : toutes les
- * formes partagent presque tout le reste (déplacer, pivoter, dupliquer,
- * copier) sans code dédié, par simple compatibilité de forme avec
- * ImageElement. Jamais verrouillable (pas de champ `locked`, contrairement
- * à StrokeElement/ImageElement) — hors de portée de cette première version.
+ * recognizeClosedShape/recognizeOpenPolyline). `x`/`y`/`width`/`height`/
+ * `rotation` fonctionnent comme pour ImageElement — un rectangle englobant
+ * avant rotation, pivoté autour de son centre — SAUF pour "line"/"arrow" :
+ * `width`/`height` PEUVENT être négatifs pour ces deux formes, le trait
+ * allant du point (x, y) au point (x + width, y + height). C'est ce signe
+ * qui encode leur direction, jamais `rotation` seule (qui reste disponible
+ * en plus, pour une rotation ultérieure via la poignée de sélection) —
+ * contrairement à "rectangle"/"ellipse"/"triangle"/"polygon"/"polyline", où
+ * width/height restent toujours positifs comme pour une image. Cette
+ * différence est ce qui distingue leur code dans scaleElement/
+ * hitTestElementAt/etc. (voir view.ts) : toutes les formes partagent presque
+ * tout le reste (déplacer, pivoter, dupliquer, copier) sans code dédié, par
+ * simple compatibilité de forme avec ImageElement. Jamais verrouillable (pas
+ * de champ `locked`, contrairement à StrokeElement/ImageElement) — hors de
+ * portée de cette première version.
  */
 export interface ShapeElement {
 	id: string;
@@ -147,6 +166,20 @@ export interface ShapeElement {
 	color: string;
 	/** Épaisseur du contour, comme Stroke.size. */
 	size: number;
+	/**
+	 * Sommets, UNIQUEMENT pour `shape` "polygon" (contour refermé — étoile,
+	 * pentagone, quadrilatère non rectangulaire...) ou "polyline" (contour
+	 * OUVERT — chevron, flèche en angle, zigzag) ; absent pour toute autre
+	 * forme. Coordonnées en FRACTION (0 à 1) de `width`/`height`, jamais en
+	 * pixels absolus — comme ImageElement.crop, pour rester valides tel
+	 * quel après n'importe quel redimensionnement (scaleElement, voir
+	 * view.ts) : ni lui ni updateRecognizedShapeScale n'ont besoin de
+	 * connaître "polygon"/"polyline" pour continuer à fonctionner, aucun des
+	 * deux ne touchant jamais `vertices`. Dans l'ordre du tracé ; "polygon"
+	 * referme automatiquement du dernier sommet au premier au rendu (voir
+	 * render.ts:drawShapeElement), "polyline" jamais.
+	 */
+	vertices?: { x: number; y: number }[];
 }
 
 /** Alignement horizontal du texte à l'intérieur de sa boîte — voir TextElement.align, render.ts:drawTextElement. "justify" étire chaque ligne pour remplir toute la largeur en espaçant ses mots, SAUF la dernière ligne d'un paragraphe (retour à la ligne saisi par l'utilisateur, ou toute dernière ligne du texte) — comme dans n'importe quel traitement de texte, jamais la dernière ligne d'un bloc justifié. */

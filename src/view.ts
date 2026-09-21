@@ -236,8 +236,19 @@ const CLOSED_PATH_GAP_RATIO = 0.22;
  * prendre un rectangle/triangle pour un rond.
  */
 const CIRCLE_ROUNDNESS_THRESHOLD = 0.28;
-/** Tolérance de simplification agressive (proportion de la plus grande dimension de la boîte englobante) pour ne garder que les sommets dominants d'une boucle NON ronde — 3 sommets restants = triangle, 4 = rectangle, tout le reste = pas reconnu. */
+/** Seuil de "bombement" moyen des côtés (voir polygonEdgeBulgeRatio) au-delà duquel un contour à 5-16 sommets simplifiés est en réalité un rond mal simplifié plutôt qu'une étoile/un polygone intentionnel — voir recognizeClosedShape, point 4. */
+const CIRCLE_EDGE_BULGE_THRESHOLD = 0.042;
+/** Tolérance de simplification agressive (proportion de la plus grande dimension de la boîte englobante) pour ne garder que les sommets dominants d'une boucle NON ronde — 3 sommets restants = triangle, 4 = rectangle, 5 à POLYGON_MAX_VERTICES = étoile/polygone (voir recognizeClosedShape), tout le reste = pas reconnu. */
 const CORNER_SIMPLIFY_RATIO = 0.09;
+/** Écart de longueur toléré (fraction de la plus longue) entre les côtés d'un triangle pour le juger équilatéral, ou entre les rayons/pas angulaires d'une boucle pour la juger régulière — voir isRoughlyRegular. Généreux : un tracé à main levée n'a jamais des côtés parfaitement égaux. */
+const REGULARITY_TOLERANCE = 0.3;
+/** Nombre maximal de sommets qu'un contour refermé (voir recognizeClosedShape) peut simplifier pour être tenté comme étoile/polygone plutôt qu'abandonné comme un gribouillis — assez large pour une étoile à 8 branches (16 sommets, alternant pointe/creux). */
+const POLYGON_MAX_VERTICES = 16;
+/** Rapport rayon interne/externe en dehors duquel une boucle alternée n'a plus l'air d'une étoile (trop proche de 1 : polygone régulier ordinaire ; trop proche de 0 : passage par le centre, tracé aberrant) — voir detectStar. */
+const STAR_INNER_OUTER_MIN = 0.15;
+const STAR_INNER_OUTER_MAX = 0.8;
+/** Nombre maximal de sommets d'une ligne brisée OUVERTE (chevron, flèche en angle, zigzag) reconnue par recognizeOpenPolyline — au-delà, plus probablement un gribouillis qu'un geste volontaire. */
+const POLYLINE_MAX_VERTICES = 8;
 
 // "hand" juste avant curseur/lasso : les trois outils qui ne dessinent
 // jamais, groupés ensemble, main en premier puisque c'est le seul des trois
@@ -274,8 +285,8 @@ const TEXT_DRAG_MIN_SCREEN_PX = 10;
 /** Largeur minimale (repère de page) d'une zone de texte créée par glissement — sans plancher, un glissement presque horizontal produirait une boîte trop étroite pour rester lisible ou même cliquable ensuite. */
 const TEXT_BOX_MIN_WIDTH_PX = 40;
 
-/** Palette de formes prédéfinies, dans son propre groupe de la barre d'outils (voir buildToolbar) — pas mêlée à TOOLS. Le carré et le rond n'ont pas leur propre outil : Maj maintenue pendant le tracé donne un rapport 1:1 à "rectangle"/"ellipse", exactement comme le redimensionnement d'une sélection ailleurs dans le plugin. */
-const SHAPE_TOOLS: ShapeKind[] = ["rectangle", "ellipse", "triangle", "line", "arrow"];
+/** Palette de formes prédéfinies, dans son propre groupe de la barre d'outils (voir buildToolbar) — pas mêlée à TOOLS. Le carré et le rond n'ont pas leur propre outil : Maj maintenue pendant le tracé donne un rapport 1:1 à "rectangle"/"ellipse", exactement comme le redimensionnement d'une sélection ailleurs dans le plugin. "polygon"/"polyline" (formes reconnues à main levée, jamais dans cette palette) exclus — voir isShapeTool. */
+const SHAPE_TOOLS: Exclude<ShapeKind, "polygon" | "polyline">[] = ["rectangle", "ellipse", "triangle", "line", "arrow"];
 
 const TOOL_ICONS: Record<ActiveTool, string> = {
 	pen: "pencil",
@@ -388,7 +399,8 @@ function isSelectionTool(tool: ActiveTool): tool is "select" | "cursor" {
 	return tool === "select" || tool === "cursor";
 }
 
-function isShapeTool(tool: ActiveTool): tool is ShapeKind {
+/** "polygon"/"polyline" exclus (voir ActiveTool, settings.ts) : ce sont des ShapeKind possibles pour une forme reconnue, jamais un outil de la palette. */
+function isShapeTool(tool: ActiveTool): tool is Exclude<ShapeKind, "polygon" | "polyline"> {
 	return tool === "rectangle" || tool === "ellipse" || tool === "triangle" || tool === "line" || tool === "arrow";
 }
 
@@ -455,6 +467,276 @@ const MOMENTUM_FRICTION_PER_MS = 0.998;
 
 function clamp(value: number, min: number, max: number): number {
 	return Math.min(max, Math.max(min, value));
+}
+
+// --- Géométrie pour la reconnaissance de forme à main levée -----------------
+//
+// Fonctions pures, sans état — utilisées par DrawView.recognizeClosedShape et
+// recognizeOpenPolyline (voir plus bas) pour aller au-delà de rond/carré/
+// triangle/ligne : étoile, polygone régulier ou non, ligne brisée ouverte
+// (chevron, flèche en angle, zigzag) — "n'importe quelle forme", comme
+// demandé, à condition d'avoir des coins nets (voir CORNER_SIMPLIFY_RATIO) :
+// jamais un moteur de reconnaissance de gestes complet, seulement de la
+// géométrie sur les sommets déjà simplifiés.
+
+/** Moyenne d'un tableau de nombres non vide. */
+function average(values: number[]): number {
+	return values.reduce((sum, v) => sum + v, 0) / values.length;
+}
+
+/** Vrai si l'écart entre le plus grand et le plus petit de `values` reste sous `tolerance` (fraction du plus grand) — un tracé à main levée n'a jamais des longueurs/rayons/pas angulaires parfaitement égaux. */
+function isRoughlyRegular(values: number[], tolerance: number): boolean {
+	const max = Math.max(...values);
+	const min = Math.min(...values);
+	if (max <= 1e-6) return false;
+	return (max - min) / max <= tolerance;
+}
+
+/** Sommets d'un contour REFERMÉ déjà simplifié (voir simplifyPoints) : le dernier point d'une boucle simplifiée revient quasiment sur le premier, il ne compte pas comme un sommet distinct. */
+function closedPathVertices(simplified: Pt[]): [number, number][] {
+	const n = simplified.length > 1 ? simplified.length - 1 : simplified.length;
+	return simplified.slice(0, n).map(([x, y]) => [x, y] as [number, number]);
+}
+
+/** Centre géométrique (moyenne simple des sommets, pas le centroïde pondéré par aire) d'un polygone — suffisant pour orienter/rayonner une forme reconnue, jamais utilisé pour un calcul physique. */
+function verticesCentroid(vertices: [number, number][]): [number, number] {
+	let sx = 0;
+	let sy = 0;
+	for (const [x, y] of vertices) {
+		sx += x;
+		sy += y;
+	}
+	return [sx / vertices.length, sy / vertices.length];
+}
+
+/** Longueur de chaque côté d'un polygone FERMÉ (dernier sommet relié au premier). */
+function closedSideLengths(vertices: [number, number][]): number[] {
+	const n = vertices.length;
+	const lengths: number[] = [];
+	for (let i = 0; i < n; i++) {
+		const [ax, ay] = vertices[i];
+		const [bx, by] = vertices[(i + 1) % n];
+		lengths.push(Math.hypot(bx - ax, by - ay));
+	}
+	return lengths;
+}
+
+/** Distance de chaque sommet à `(cx, cy)`. */
+function radiiFrom(vertices: [number, number][], cx: number, cy: number): number[] {
+	return vertices.map(([x, y]) => Math.hypot(x - cx, y - cy));
+}
+
+/** Distance perpendiculaire d'un point à la droite (infinie) passant par a et b — même formule que simplify.ts, dupliquée ici plutôt qu'exportée (usage ponctuel, voir polygonEdgeBulgeRatio). */
+function perpendicularDistanceToLine(point: Pt, a: Pt, b: Pt): number {
+	const [x, y] = point;
+	const [x1, y1] = a;
+	const [x2, y2] = b;
+	const dx = x2 - x1;
+	const dy = y2 - y1;
+	const lenSq = dx * dx + dy * dy;
+	if (lenSq === 0) return Math.hypot(x - x1, y - y1);
+	return Math.abs(dy * x - dx * y + x2 * y1 - y2 * x1) / Math.sqrt(lenSq);
+}
+
+/**
+ * Distingue un VRAI côté droit (polygone/étoile intentionnels) d'un arc de
+ * cercle que la simplification RDP a dû malgré tout découper en plusieurs
+ * "sommets" (voir recognizeClosedShape, point 4) : pour la tolérance de
+ * CORNER_SIMPLIFY_RATIO utilisée ici, un cercle authentique se simplifie
+ * presque toujours en 5 à 8 sommets environ (le calcul de sagitte d'un arc
+ * le montre), pile la plage où l'on cherche aussi étoiles et polygones — le
+ * seul test de rondeur global (coefficient de variation des distances au
+ * centroïde) échoue à les départager, un polygone régulier à peu de côtés
+ * ayant lui aussi un coefficient de variation naturellement bas.
+ * Ce que les deux cas n'ont PAS en commun : entre deux sommets simplifiés
+ * consécutifs, un vrai côté droit ne s'écarte de sa corde que par le
+ * tremblement de la main (quasi nul, relatif à la longueur du côté) ; un arc
+ * de cercle approximé par une corde s'en écarte, lui, de façon systématique
+ * — le "bombement" (sagitte) de l'arc, une fraction bien plus grande et
+ * cohérente sur tous les côtés. Retourne la moyenne, sur tous les côtés, de
+ * l'écart perpendiculaire MOYEN de leurs points d'origine (pas le maximum,
+ * trop sensible à un seul point de bruit) rapporté à la longueur de la corde
+ * — validé empiriquement (voir /tmp/test_bulge2.mjs de la session) : un
+ * cercle à main levée reste toujours au-dessus de CIRCLE_EDGE_BULGE_THRESHOLD
+ * (~0.045 à 0.07 observé), un vrai polygone/étoile jusqu'à 8-10 côtés reste
+ * toujours en dessous (~0.005 à 0.035 observé), quels que soient sa taille et
+ * le tremblement de la main.
+ */
+function polygonEdgeBulgeRatio(points: Pt[], simplified: Pt[]): number {
+	let sumRatio = 0;
+	let segmentCount = 0;
+	let searchStart = 0;
+	for (let i = 0; i < simplified.length - 1; i++) {
+		const a = simplified[i];
+		const b = simplified[i + 1];
+		const aIdx = points.indexOf(a, searchStart);
+		const bIdx = points.indexOf(b, aIdx < 0 ? searchStart : aIdx);
+		if (aIdx < 0 || bIdx < 0 || bIdx <= aIdx) continue;
+		const chordLen = Math.hypot(b[0] - a[0], b[1] - a[1]);
+		if (chordLen < 1e-6) continue;
+		let sumDev = 0;
+		let n = 0;
+		for (let k = aIdx + 1; k < bIdx; k++) {
+			sumDev += perpendicularDistanceToLine(points[k], a, b);
+			n++;
+		}
+		if (n === 0) continue;
+		sumRatio += sumDev / n / chordLen;
+		segmentCount++;
+		searchStart = bIdx;
+	}
+	return segmentCount > 0 ? sumRatio / segmentCount : 0;
+}
+
+/**
+ * Vrai si `vertices` (exactement 4, dans l'ordre du tracé) forme à peu près
+ * un rectangle : côtés opposés de longueur proche, et chaque angle proche de
+ * 90°. Tolérance généreuse (tracé à main levée) — un quadrilatère qui échoue
+ * ce test (cerf-volant, losange, trapèze...) devient un "polygon" à sommets
+ * réels plutôt qu'un rectangle forcé (voir recognizeClosedShape).
+ */
+function isRoughlyRectangular(vertices: [number, number][]): boolean {
+	if (vertices.length !== 4) return false;
+	const sides = closedSideLengths(vertices);
+	const opp1 = Math.max(sides[0], sides[2]);
+	const opp2 = Math.max(sides[1], sides[3]);
+	if (opp1 <= 1e-6 || opp2 <= 1e-6) return false;
+	if (Math.abs(sides[0] - sides[2]) / opp1 > REGULARITY_TOLERANCE) return false;
+	if (Math.abs(sides[1] - sides[3]) / opp2 > REGULARITY_TOLERANCE) return false;
+
+	for (let i = 0; i < 4; i++) {
+		const prev = vertices[(i + 3) % 4];
+		const corner = vertices[i];
+		const next = vertices[(i + 1) % 4];
+		const v1x = prev[0] - corner[0];
+		const v1y = prev[1] - corner[1];
+		const v2x = next[0] - corner[0];
+		const v2y = next[1] - corner[1];
+		const mag = Math.hypot(v1x, v1y) * Math.hypot(v2x, v2y);
+		if (mag <= 1e-6) return false;
+		const angleDeg = (Math.acos(clamp((v1x * v2x + v1y * v2y) / mag, -1, 1)) * 180) / Math.PI;
+		if (Math.abs(angleDeg - 90) > 25) return false;
+	}
+	return true;
+}
+
+/**
+ * Détecte une boucle en étoile (sommets alternant pointe/creux, voir
+ * STAR_INNER_OUTER_MIN/MAX) : `null` si le nombre de sommets est impair (une
+ * étoile en a toujours 2N, N pointes) ou si l'alternance n'est pas assez
+ * nette. `outerStartIndex` : lequel des deux groupes (pair/impair) porte les
+ * pointes, pour orienter l'étoile régulière sur le sommet-pointe réellement
+ * dessiné en premier (voir starVertices).
+ */
+function detectStar(
+	vertices: [number, number][],
+	cx: number,
+	cy: number
+): { points: number; outerRadius: number; innerRadius: number; outerStartIndex: 0 | 1 } | null {
+	const n = vertices.length;
+	if (n < 8 || n % 2 !== 0) return null;
+	const radii = radiiFrom(vertices, cx, cy);
+	const evens = radii.filter((_, i) => i % 2 === 0);
+	const odds = radii.filter((_, i) => i % 2 === 1);
+	const evenMean = average(evens);
+	const oddMean = average(odds);
+	const outerStartIndex: 0 | 1 = evenMean >= oddMean ? 0 : 1;
+	const [outerRadii, innerRadii] = outerStartIndex === 0 ? [evens, odds] : [odds, evens];
+	const outerMean = average(outerRadii);
+	const innerMean = average(innerRadii);
+	if (outerMean <= 1e-6) return null;
+	const ratio = innerMean / outerMean;
+	if (ratio < STAR_INNER_OUTER_MIN || ratio > STAR_INNER_OUTER_MAX) return null;
+	if (!isRoughlyRegular(outerRadii, REGULARITY_TOLERANCE + 0.15)) return null;
+	if (!isRoughlyRegular(innerRadii, REGULARITY_TOLERANCE + 0.15)) return null;
+	return { points: n / 2, outerRadius: outerMean, innerRadius: innerMean, outerStartIndex };
+}
+
+/** Sommets d'une étoile régulière à `points` branches, centrée en (0,0) — `rotationRad` place la première pointe (voir la doc de detectStar pour `outerStartIndex`, déjà résolu par l'appelant en un simple angle de départ). */
+function starVertices(points: number, outerRadius: number, innerRadius: number, rotationRad: number): [number, number][] {
+	const verts: [number, number][] = [];
+	const step = Math.PI / points;
+	for (let i = 0; i < points * 2; i++) {
+		const r = i % 2 === 0 ? outerRadius : innerRadius;
+		const angle = rotationRad + i * step;
+		verts.push([Math.cos(angle) * r, Math.sin(angle) * r]);
+	}
+	return verts;
+}
+
+/**
+ * Détecte un polygone RÉGULIER (pentagone, hexagone...) : sommets à peu près
+ * équidistants du centre ET à peu près régulièrement espacés en angle —
+ * cette seconde condition évite de prendre un polygone irrégulier pour
+ * régulier juste parce que ses sommets sont, par coïncidence, à peu près à
+ * la même distance du centre.
+ */
+function detectRegularPolygon(
+	vertices: [number, number][],
+	cx: number,
+	cy: number
+): { sides: number; radius: number; rotationRad: number } | null {
+	const n = vertices.length;
+	const radii = radiiFrom(vertices, cx, cy);
+	if (!isRoughlyRegular(radii, REGULARITY_TOLERANCE)) return null;
+
+	const angles = vertices.map(([x, y]) => Math.atan2(y - cy, x - cx));
+	const steps: number[] = [];
+	for (let i = 0; i < n; i++) {
+		let diff = angles[(i + 1) % n] - angles[i];
+		while (diff <= 0) diff += Math.PI * 2;
+		steps.push(diff);
+	}
+	if (!isRoughlyRegular(steps, REGULARITY_TOLERANCE + 0.2)) return null;
+
+	return { sides: n, radius: average(radii), rotationRad: angles[0] };
+}
+
+/** Sommets d'un polygone régulier à `sides` côtés, centré en (0,0), `rotationRad` plaçant le premier sommet. */
+function regularPolygonVertices(sides: number, radius: number, rotationRad: number): [number, number][] {
+	const verts: [number, number][] = [];
+	for (let i = 0; i < sides; i++) {
+		const angle = rotationRad + (i * Math.PI * 2) / sides;
+		verts.push([Math.cos(angle) * radius, Math.sin(angle) * radius]);
+	}
+	return verts;
+}
+
+/**
+ * Convertit des sommets en repère PAGE (n'importe lesquels, centrés sur
+ * n'importe quoi) en géométrie de ShapeElement : boîte englobante posée sur
+ * `(cx, cy)` en son centre, et sommets réexprimés en fraction (0 à 1) de
+ * cette boîte (voir ShapeElement.vertices, model.ts) — partagée par toutes
+ * les formes reconnues à sommets réels (étoile, polygone régulier ou non,
+ * ligne brisée ouverte).
+ */
+function verticesToShapeGeometry(
+	verticesAroundOrigin: [number, number][],
+	cx: number,
+	cy: number
+): { x: number; y: number; width: number; height: number; vertices: { x: number; y: number }[] } {
+	let minX = Infinity;
+	let minY = Infinity;
+	let maxX = -Infinity;
+	let maxY = -Infinity;
+	for (const [x, y] of verticesAroundOrigin) {
+		if (x < minX) minX = x;
+		if (y < minY) minY = y;
+		if (x > maxX) maxX = x;
+		if (y > maxY) maxY = y;
+	}
+	const width = Math.max(1e-6, maxX - minX);
+	const height = Math.max(1e-6, maxY - minY);
+	return {
+		x: cx - width / 2,
+		y: cy - height / 2,
+		width,
+		height,
+		vertices: verticesAroundOrigin.map(([x, y]) => ({
+			x: (x - minX) / width,
+			y: (y - minY) / height,
+		})),
+	};
 }
 
 /** État d'affichage (pas une propriété du document) : échelle et décalage du DOCUMENT entier (toutes les pages empilées) à l'écran — voir layoutPages. */
@@ -4253,9 +4535,10 @@ export class DrawView extends TextFileView {
 				y: candidate.y,
 				width: candidate.width,
 				height: candidate.height,
-				rotation: 0,
+				rotation: candidate.rotation ?? 0,
 				color: this.activeStroke.color,
 				size: this.activeStroke.size,
+				...(candidate.vertices ? { vertices: candidate.vertices } : {}),
 			};
 			this.recognizedShapeAnchor = {
 				cx: candidate.x + candidate.width / 2,
@@ -4270,9 +4553,42 @@ export class DrawView extends TextFileView {
 			return;
 		}
 
-		if (!this.isClosedPath(this.activeStroke.points)) {
-			this.triggerStraighten(false);
+		if (this.isClosedPath(this.activeStroke.points)) return;
+
+		// Tracé encore ouvert : une ligne brisée à plusieurs coins nets (voir
+		// recognizeOpenPolyline — chevron ">"/"^", flèche en angle, zigzag)
+		// devient une "polyline" ; sinon, repli sur la conversion en simple
+		// segment droit déjà existante (triggerStraighten).
+		const polyline = this.recognizeOpenPolyline(this.activeStroke.points);
+		if (polyline) {
+			this.clearStillnessTimer();
+			this.recognizedShape = {
+				id: this.activeStroke.id,
+				type: "shape",
+				shape: "polyline",
+				x: polyline.x,
+				y: polyline.y,
+				width: polyline.width,
+				height: polyline.height,
+				rotation: 0,
+				color: this.activeStroke.color,
+				size: this.activeStroke.size,
+				vertices: polyline.vertices,
+			};
+			this.recognizedShapeAnchor = {
+				cx: polyline.x + polyline.width / 2,
+				cy: polyline.y + polyline.height / 2,
+				baseWidth: polyline.width,
+				baseHeight: polyline.height,
+			};
+			if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
+				navigator.vibrate(STRAIGHTEN_HAPTIC_MS);
+			}
+			this.scheduleActiveRedraw();
+			return;
 		}
+
+		this.triggerStraighten(false);
 	}
 
 	/**
@@ -4302,27 +4618,58 @@ export class DrawView extends TextFileView {
 	}
 
 	/**
-	 * Reconnaît un tracé refermé comme un rond, un rectangle ou un triangle —
-	 * `null` s'il est trop court, trop petit, encore ouvert, ou qu'aucun des
-	 * trois ne correspond avec assez de confiance (voir les constantes
-	 * RECOGNIZE_MIN_POINTS, RECOGNIZE_MIN_SIZE_PX, CLOSED_PATH_GAP_RATIO,
-	 * CIRCLE_ROUNDNESS_THRESHOLD, CORNER_SIMPLIFY_RATIO en tête de fichier).
-	 * Heuristique volontairement
-	 * simple plutôt qu'un vrai moteur de reconnaissance de gestes :
-	 *  1. Rond : le coefficient de variation des distances de chaque point au
-	 *     centroïde — bas pour un cercle (rayon à peu près constant), élevé
-	 *     dès que des coins marqués s'écartent nettement de la moyenne.
-	 *  2. Sinon, coins dominants : une simplification RDP volontairement
-	 *     agressive (voir simplify.ts) ne garde que les sommets marqués —
-	 *     3 sommets restants = triangle, 4 = rectangle, tout le reste
-	 *     (2, 5 ou plus) = pas reconnu.
-	 * La boîte englobante réelle du tracé sert de géométrie à la forme
-	 * reconnue dans tous les cas — jamais les sommets exacts détectés, voir
-	 * ShapeElement (model.ts) : "propre" prime sur "fidèle au tracé".
+	 * Reconnaît un tracé refermé comme un rond, un rectangle, un triangle
+	 * (équilatéral compris, avec sa vraie orientation), une étoile ou un
+	 * polygone (régulier ou non) — `null` s'il est trop court, trop petit,
+	 * encore ouvert, ou que rien ne correspond avec assez de confiance (voir
+	 * les constantes RECOGNIZE_MIN_POINTS, RECOGNIZE_MIN_SIZE_PX,
+	 * CLOSED_PATH_GAP_RATIO, CIRCLE_ROUNDNESS_THRESHOLD, CORNER_SIMPLIFY_RATIO,
+	 * REGULARITY_TOLERANCE, POLYGON_MAX_VERTICES en tête de fichier).
+	 * Heuristique volontairement simple plutôt qu'un vrai moteur de
+	 * reconnaissance de gestes :
+	 *  1. Coins dominants d'abord : une simplification RDP volontairement
+	 *     agressive (voir simplify.ts) ne garde que les sommets marqués — un
+	 *     vrai cercle, à la courbure continue, ne s'y réduit presque jamais
+	 *     (voir le bug signalé historique : "il me fait trop facilement des
+	 *     ronds au lieu des carrés"), donc atteindre un nombre de sommets net
+	 *     est déjà un signe fort de coins volontaires, pas de rondeur.
+	 *  2. 3 sommets : triangle — équilatéral (côtés proches, voir
+	 *     isRoughlyRegular) devient un "polygon" à 3 sommets réels, orienté
+	 *     comme le sommet réellement tracé en premier (voir
+	 *     regularPolygonVertices — jamais le gabarit "triangle" isocèle
+	 *     ci-dessous pivoté, dont la boîte englobante n'est pas centrée sur
+	 *     son centroïde une fois tourné) ; sinon, comme avant, l'isocèle
+	 *     conventionnel dans sa boîte englobante, jamais pivoté.
+	 *  3. 4 sommets : rectangle si les angles/côtés opposés y ressemblent
+	 *     (voir isRoughlyRectangular), sinon un "polygon" à 4 sommets réels
+	 *     (cerf-volant, losange, trapèze...).
+	 *  4. 5 à POLYGON_MAX_VERTICES sommets : d'abord polygonEdgeBulgeRatio, qui
+	 *     vérifie que chaque côté simplifié est VRAIMENT droit plutôt qu'un
+	 *     arc de cercle approximé par une corde — avec la tolérance utilisée
+	 *     ici, un vrai rond à main levée se réduit quasi toujours à 5-8
+	 *     "sommets" bruités, et serait sinon reconnu à tort comme un octogone/
+	 *     polygone régulier (bug signalé : "je veux que si je fais un rond il
+	 *     me le fasse propre et pas un octogone"). Sinon, étoile (voir
+	 *     detectStar) si l'alternance pointe/creux est nette, sinon polygone
+	 *     RÉGULIER (voir detectRegularPolygon) si les sommets sont bien
+	 *     répartis en cercle, sinon un "polygon" à sommets réels tel quel —
+	 *     "n'importe quelle forme", comme demandé, tant qu'elle a des coins nets.
+	 *  5. Sinon (2 sommets, ou plus de POLYGON_MAX_VERTICES) : repli sur le
+	 *     même test de rondeur (coefficient de variation des distances au
+	 *     centroïde) pour un rond/une ellipse.
+	 * Sauf triangle équilatéral/étoile/polygone (sommets réels, voir
+	 * ShapeElement.vertices), la boîte englobante réelle du tracé sert de
+	 * géométrie à la forme reconnue : "propre" prime sur "fidèle au tracé".
 	 */
-	private recognizeClosedShape(
-		points: Pt[]
-	): { shape: ShapeKind; x: number; y: number; width: number; height: number } | null {
+	private recognizeClosedShape(points: Pt[]): {
+		shape: ShapeKind;
+		x: number;
+		y: number;
+		width: number;
+		height: number;
+		rotation?: number;
+		vertices?: { x: number; y: number }[];
+	} | null {
 		if (points.length < RECOGNIZE_MIN_POINTS) return null;
 		if (!this.isClosedPath(points)) return null;
 
@@ -4344,46 +4691,165 @@ export class DrawView extends TextFileView {
 		const height = maxY - minY;
 		if (width < RECOGNIZE_MIN_SIZE_PX || height < RECOGNIZE_MIN_SIZE_PX) return null;
 
-		// Des coins nets sont un indice bien plus spécifique qu'un faible
-		// coefficient de variation : un carré/rectangle tracé à main levée a
-		// souvent lui aussi une variation assez basse (les quatre coins ne
-		// s'écartent du centre que d'un facteur √2 par rapport aux milieux de
-		// côté), ce qui le faisait auparavant passer pour un rond avant même
-		// d'atteindre ce test — voir le bug signalé ("il me fait trop
-		// facilement des ronds au lieu des carrés"). Les coins passent donc
-		// EN PREMIER ; le rond n'est plus qu'un repli pour tout ce qui ne
-		// simplifie pas proprement en 3 ou 4 sommets (un vrai cercle, avec sa
-		// courbure continue, ne s'y réduit presque jamais).
-		const tolerance = Math.max(width, height) * CORNER_SIMPLIFY_RATIO;
-		const simplified = simplifyPoints(points, tolerance);
-		// Un tracé fermé simplifié revient quasiment sur son premier point :
-		// ce dernier point ne compte pas comme un sommet distinct.
-		const vertexCount = simplified.length > 1 ? simplified.length - 1 : simplified.length;
-
-		if (vertexCount === 3) return { shape: "triangle", x: minX, y: minY, width, height };
-		if (vertexCount === 4) return { shape: "rectangle", x: minX, y: minY, width, height };
-
-		const cx = sumX / points.length;
-		const cy = sumY / points.length;
-
+		// Rondeur du tracé RÉEL (coefficient de variation des distances au
+		// centroïde) — calculée ici, AVANT toute simplification RDP, pour
+		// pouvoir départager un vrai rond d'un polygone à 5+ sommets plus bas
+		// (voir son usage dans la branche vertexCount >= 5, et en repli final).
+		const roundCx = sumX / points.length;
+		const roundCy = sumY / points.length;
 		let sumDist = 0;
 		const dists: number[] = [];
 		for (const [x, y] of points) {
-			const d = Math.hypot(x - cx, y - cy);
+			const d = Math.hypot(x - roundCx, y - roundCy);
 			dists.push(d);
 			sumDist += d;
 		}
 		const meanDist = sumDist / dists.length;
-		if (meanDist < 1e-6) return null;
-		let variance = 0;
-		for (const d of dists) variance += (d - meanDist) ** 2;
-		variance /= dists.length;
-		const coeffVar = Math.sqrt(variance) / meanDist;
+		let coeffVar = Infinity;
+		if (meanDist >= 1e-6) {
+			let variance = 0;
+			for (const d of dists) variance += (d - meanDist) ** 2;
+			variance /= dists.length;
+			coeffVar = Math.sqrt(variance) / meanDist;
+		}
 
+		const tolerance = Math.max(width, height) * CORNER_SIMPLIFY_RATIO;
+		const simplified = simplifyPoints(points, tolerance);
+		const vertexCount = simplified.length > 1 ? simplified.length - 1 : simplified.length;
+
+		if (vertexCount === 3) {
+			const verts = closedPathVertices(simplified);
+			const sides = closedSideLengths(verts);
+			if (isRoughlyRegular(sides, REGULARITY_TOLERANCE)) {
+				// Équilatéral : un "polygon" à 3 sommets réels, exactement comme un
+				// polygone régulier (voir detectRegularPolygon/regularPolygonVertices
+				// plus bas) — jamais le gabarit isocèle "triangle" existant, dont la
+				// boîte englobante n'est PAS centrée sur le même point que son
+				// centroïde une fois pivoté (un premier essai basé sur `rotation` +
+				// cette boîte donnait une orientation fausse, voir le bug intercepté
+				// avant publication). L'angle du premier sommet DEPUIS LE CENTROÏDE
+				// (jamais depuis le centre de la boîte englobante, qui se déplace
+				// avec l'orientation) reste, lui, valide quelle que soit la rotation
+				// du tracé — c'est ce qui rend cette approche correcte.
+				const [cx, cy] = verticesCentroid(verts);
+				const [firstX, firstY] = verts[0];
+				const rotationRad = Math.atan2(firstY - cy, firstX - cx);
+				const radius = average(radiiFrom(verts, cx, cy));
+				const raw = regularPolygonVertices(3, radius, rotationRad);
+				return { shape: "polygon", ...verticesToShapeGeometry(raw, cx, cy) };
+			}
+			return { shape: "triangle", x: minX, y: minY, width, height };
+		}
+
+		if (vertexCount === 4) {
+			const verts = closedPathVertices(simplified);
+			if (isRoughlyRectangular(verts)) {
+				return { shape: "rectangle", x: minX, y: minY, width, height };
+			}
+			// Cerf-volant, losange, trapèze... : un "polygon" à ses 4 sommets
+			// réels plutôt qu'un rectangle forcé qui trahirait le tracé.
+			const [cx, cy] = verticesCentroid(verts);
+			const geometry = verticesToShapeGeometry(
+				verts.map(([x, y]) => [x - cx, y - cy]),
+				cx,
+				cy
+			);
+			return { shape: "polygon", ...geometry };
+		}
+
+		if (vertexCount >= 5 && vertexCount <= POLYGON_MAX_VERTICES) {
+			// Un vrai rond, avec la tolérance de simplification utilisée ici, se
+			// réduit quasi toujours à 5-8 "sommets" (le calcul de sagitte d'un
+			// arc de cercle le montre) — pile la plage visée pour étoiles et
+			// polygones. Le coefficient de variation global ne les départage pas
+			// (un polygone régulier à peu de côtés a lui aussi un coefficient bas,
+			// voir CIRCLE_ROUNDNESS_THRESHOLD) : voir polygonEdgeBulgeRatio, qui
+			// regarde plutôt si chaque côté simplifié est VRAIMENT droit.
+			if (polygonEdgeBulgeRatio(points, simplified) >= CIRCLE_EDGE_BULGE_THRESHOLD) {
+				return { shape: "ellipse", x: minX, y: minY, width, height };
+			}
+
+			const verts = closedPathVertices(simplified);
+			const [cx, cy] = verticesCentroid(verts);
+
+			const star = detectStar(verts, cx, cy);
+			if (star) {
+				const [startX, startY] = verts[star.outerStartIndex];
+				const rotationRad = Math.atan2(startY - cy, startX - cx);
+				const raw = starVertices(star.points, star.outerRadius, star.innerRadius, rotationRad);
+				return { shape: "polygon", ...verticesToShapeGeometry(raw, cx, cy) };
+			}
+
+			const regular = detectRegularPolygon(verts, cx, cy);
+			if (regular) {
+				const raw = regularPolygonVertices(regular.sides, regular.radius, regular.rotationRad);
+				return { shape: "polygon", ...verticesToShapeGeometry(raw, cx, cy) };
+			}
+
+			// Ni étoile ni régulier : "n'importe quelle forme" à coins nets
+			// devient quand même un polygone propre, à ses sommets réels
+			// (déjà redressés en lignes droites par simplifyPoints).
+			const geometry = verticesToShapeGeometry(
+				verts.map(([x, y]) => [x - cx, y - cy]),
+				cx,
+				cy
+			);
+			return { shape: "polygon", ...geometry };
+		}
+
+		if (meanDist < 1e-6) return null;
 		if (coeffVar < CIRCLE_ROUNDNESS_THRESHOLD) {
 			return { shape: "ellipse", x: minX, y: minY, width, height };
 		}
 		return null;
+	}
+
+	/**
+	 * Reconnaît une ligne brisée OUVERTE (chevron ">"/"^", flèche en angle,
+	 * zigzag) — `null` si trop courte, trop petite, refermée (voir
+	 * recognizeClosedShape pour ce cas), ou si la simplification RDP ne
+	 * garde que 2 sommets (un simple segment, l'affaire de triggerStraighten,
+	 * jamais celle-ci) ou plus de POLYLINE_MAX_VERTICES (probablement un
+	 * gribouillis). Contrairement à un contour refermé, les sommets réels
+	 * sont TOUJOURS conservés (voir ShapeElement.vertices) : rien à
+	 * "régulariser" pour une ligne ouverte, seulement à redresser chaque
+	 * segment — déjà fait par simplifyPoints.
+	 */
+	private recognizeOpenPolyline(
+		points: Pt[]
+	): { x: number; y: number; width: number; height: number; vertices: { x: number; y: number }[] } | null {
+		if (points.length < RECOGNIZE_MIN_POINTS) return null;
+		if (this.isClosedPath(points)) return null;
+
+		let minX = Infinity;
+		let minY = Infinity;
+		let maxX = -Infinity;
+		let maxY = -Infinity;
+		for (const [x, y] of points) {
+			if (x < minX) minX = x;
+			if (y < minY) minY = y;
+			if (x > maxX) maxX = x;
+			if (y > maxY) maxY = y;
+		}
+		const width = maxX - minX;
+		const height = maxY - minY;
+		if (width < RECOGNIZE_MIN_SIZE_PX && height < RECOGNIZE_MIN_SIZE_PX) return null;
+
+		const tolerance = Math.max(width, height) * CORNER_SIMPLIFY_RATIO;
+		const simplified = simplifyPoints(points, tolerance);
+		if (simplified.length < 3 || simplified.length > POLYLINE_MAX_VERTICES) return null;
+		if (width <= 1e-6 || height <= 1e-6) return null;
+
+		return {
+			x: minX,
+			y: minY,
+			width,
+			height,
+			vertices: simplified.map(([x, y]) => ({
+				x: (x - minX) / width,
+				y: (y - minY) / height,
+			})),
+		};
 	}
 
 	/**
@@ -5712,13 +6178,17 @@ export class DrawView extends TextFileView {
 	}
 
 	/**
-	 * Points d'échantillonnage du CONTOUR d'un rectangle/triangle/ellipse, en
-	 * repère de page (rotation déjà appliquée) — jamais pour ligne/flèche
-	 * (voir eraseLineZone, un vrai segment, pas un contour à échantillonner).
-	 * Rectangle/triangle : leurs coins, échantillonnés à intervalle constant
-	 * (voir samplePolygonOutline). Ellipse : approximée par un polygone dont
-	 * le nombre de côtés suit son périmètre (voir ERASE_SAMPLE_STEP_PX) — fin
-	 * par construction (voir eraseZone, render.ts, qui opère point par
+	 * Points d'échantillonnage du CONTOUR d'un rectangle/triangle/ellipse/
+	 * polygon, en repère de page (rotation déjà appliquée) — jamais pour
+	 * ligne/flèche/polyline (voir eraseLineZone/polylineOutlinePoints, de
+	 * vrais segments OUVERTS, pas un contour refermé à échantillonner).
+	 * Rectangle/triangle/polygon : leurs coins, échantillonnés à intervalle
+	 * constant (voir samplePolygonOutline) — "polygon" (étoile, quadrilatère
+	 * non rectangulaire, polygone régulier ou non, voir ShapeElement.vertices)
+	 * réutilise ses sommets réels, en fraction de width/height comme au rendu
+	 * (voir render.ts:drawShapeElement). Ellipse : approximée par un polygone
+	 * dont le nombre de côtés suit son périmètre (voir ERASE_SAMPLE_STEP_PX)
+	 * — fin par construction (voir eraseZone, render.ts, qui opère point par
 	 * point), donc un rendu visuellement lisse même sur une grande ellipse.
 	 */
 	private shapeOutlinePoints(el: ShapeElement): Pt[] {
@@ -5760,6 +6230,12 @@ export class DrawView extends TextFileView {
 				toPage
 			);
 		}
+		if (el.shape === "polygon" && el.vertices) {
+			return this.samplePolygonOutline(
+				el.vertices.map(({ x, y }): [number, number] => [el.x + x * el.width, el.y + y * el.height]),
+				toPage
+			);
+		}
 
 		const rx = Math.abs(el.width) / 2;
 		const ry = Math.abs(el.height) / 2;
@@ -5773,6 +6249,42 @@ export class DrawView extends TextFileView {
 			points.push(toPage(cx + Math.cos(a) * rx, cy + Math.sin(a) * ry));
 		}
 		return points;
+	}
+
+	/**
+	 * Équivalent de samplePolygonOutline, mais pour une ligne OUVERTE
+	 * (voir polylineOutlinePoints) : jamais de segment de fermeture entre le
+	 * dernier sommet et le premier.
+	 */
+	private sampleOpenPolylineOutline(vertices: [number, number][], toPage: (lx: number, ly: number) => Pt): Pt[] {
+		const points: Pt[] = [];
+		for (let e = 0; e < vertices.length - 1; e++) {
+			const [ax, ay] = vertices[e];
+			const [bx, by] = vertices[e + 1];
+			const steps = Math.max(1, Math.round(Math.hypot(bx - ax, by - ay) / ERASE_SAMPLE_STEP_PX));
+			for (let s = 0; s < steps; s++) {
+				const t = s / steps;
+				points.push(toPage(ax + (bx - ax) * t, ay + (by - ay) * t));
+			}
+		}
+		const [lastX, lastY] = vertices[vertices.length - 1];
+		points.push(toPage(lastX, lastY));
+		return points;
+	}
+
+	/** Points d'échantillonnage d'une "polyline" (chevron, flèche en angle, zigzag — voir ShapeElement.vertices), en repère de page, rotation comprise — jamais refermée, contrairement à shapeOutlinePoints. */
+	private polylineOutlinePoints(el: ShapeElement): Pt[] {
+		if (!el.vertices) return [];
+		const cx = el.x + el.width / 2;
+		const cy = el.y + el.height / 2;
+		const toPage = (lx: number, ly: number): Pt => {
+			const r = rotatePointAround(lx, ly, cx, cy, el.rotation);
+			return [r.x, r.y, 0.5];
+		};
+		return this.sampleOpenPolylineOutline(
+			el.vertices.map(({ x, y }): [number, number] => [el.x + x * el.width, el.y + y * el.height]),
+			toPage
+		);
 	}
 
 	/**
@@ -5821,6 +6333,21 @@ export class DrawView extends TextFileView {
 			}
 		}
 		return fragments;
+	}
+
+	/**
+	 * Gomme par zone sur une "polyline" reconnue (chevron, flèche en angle,
+	 * zigzag — voir ShapeElement.vertices) : contrairement à
+	 * eraseShapeOutlineZone, le contour (voir polylineOutlinePoints) est déjà
+	 * un chemin OUVERT — ses deux extrémités ne se rejoignent jamais — donc
+	 * aucune fusion de "couture" n'est nécessaire ici, eraseZone (render.ts)
+	 * traite déjà un chemin ouvert correctement de bout en bout.
+	 */
+	private eraseOpenPolylineZone(el: ShapeElement, cx: number, cy: number, radius: number): StrokeElement[] | null {
+		const outline = this.polylineOutlinePoints(el);
+		const virtualStroke: Stroke = { id: el.id, tool: "pen", color: el.color, size: el.size, points: outline };
+		if (!strokeHitTest(virtualStroke, [cx, cy], radius)) return null;
+		return eraseZone(virtualStroke, cx, cy, radius);
 	}
 
 	/**
@@ -5950,7 +6477,17 @@ export class DrawView extends TextFileView {
 				if (!this.eraserTouchesLine(el, cx, cy, radius)) continue;
 				pad = el.size;
 				fragments = this.eraseLineZone(el, cx, cy, radius);
+			} else if (el.type === "shape" && el.shape === "polyline") {
+				bounds = computeElementBounds(el);
+				if (!boundsNearCircle(bounds, cx, cy, radius)) continue;
+				const outlineFragments = this.eraseOpenPolylineZone(el, cx, cy, radius);
+				if (!outlineFragments) continue; // gomme hors du tracé : rien à faire
+				pad = el.size;
+				fragments = outlineFragments;
 			} else if (el.type === "shape") {
+				// Rectangle/ellipse/triangle, ou "polygon" reconnu à sommets réels
+				// (étoile, quadrilatère, polygone régulier ou non — voir
+				// shapeOutlinePoints, qui sait désormais échantillonner les trois).
 				bounds = computeElementBounds(el);
 				if (!boundsNearCircle(bounds, cx, cy, radius)) continue;
 				const outlineFragments = this.eraseShapeOutlineZone(el, cx, cy, radius);
@@ -5958,7 +6495,10 @@ export class DrawView extends TextFileView {
 				pad = el.size;
 				fragments = outlineFragments;
 			} else {
-				continue; // image : jamais touchée par la gomme
+				// Image ou zone de texte : jamais touchée par la gomme par zone
+				// (voir eraserTouchesBox, qui la retire tout de même d'un coup
+				// avec la gomme par TRAIT entier).
+				continue;
 			}
 
 			this.markErasedRegion(session.pageIndex, bounds, pad);
@@ -6214,6 +6754,28 @@ export class DrawView extends TextFileView {
 				const tolerance = SELECT_HIT_TOLERANCE_PX + el.size / 2;
 				const dist = distanceToSegment([local.x - el.x, local.y - el.y], [0, 0], [el.width, el.height]);
 				if (dist <= tolerance) return el;
+			} else if (el.type === "shape" && el.shape === "polyline" && el.vertices) {
+				// Même principe qu'une ligne/flèche, mais sur CHACUN des segments
+				// de la ligne brisée (voir ShapeElement.vertices) : la distance
+				// minimale parmi tous, jamais "n'importe où dans la boîte
+				// englobante" — un chevron/zigzag laisse souvent une bonne partie
+				// de sa boîte vide.
+				const cx = el.x + el.width / 2;
+				const cy = el.y + el.height / 2;
+				const local = rotatePointAround(x, y, cx, cy, -el.rotation);
+				const localX = local.x - el.x;
+				const localY = local.y - el.y;
+				const tolerance = SELECT_HIT_TOLERANCE_PX + el.size / 2;
+				let hitPolyline = false;
+				for (let v = 0; v < el.vertices.length - 1; v++) {
+					const a: [number, number] = [el.vertices[v].x * el.width, el.vertices[v].y * el.height];
+					const b: [number, number] = [el.vertices[v + 1].x * el.width, el.vertices[v + 1].y * el.height];
+					if (distanceToSegment([localX, localY], a, b) <= tolerance) {
+						hitPolyline = true;
+						break;
+					}
+				}
+				if (hitPolyline) return el;
 			} else {
 				// Image, ou forme "rectangle"/"ellipse" (width/height toujours
 				// positifs pour ces deux-là, voir ShapeElement) : n'importe où

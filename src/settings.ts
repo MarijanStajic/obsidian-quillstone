@@ -36,7 +36,12 @@ export type ActiveTool =
 	| "cursor"
 	| "select"
 	| "capture"
-	| ShapeKind
+	// "polygon"/"polyline" exclus : ce sont des valeurs de ShapeKind
+	// possibles pour une forme RECONNUE à main levée (voir
+	// view.ts:recognizeClosedShape/recognizeOpenPolyline — étoile, polygone,
+	// ligne brisée...), jamais un outil qu'on active depuis la barre
+	// d'outils, qui n'a ni bouton ni raccourci pour l'un ou l'autre.
+	| Exclude<ShapeKind, "polygon" | "polyline">
 	| "laser"
 	| "hand"
 	| "text";

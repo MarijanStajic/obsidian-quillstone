@@ -685,8 +685,22 @@ function drawShapeElement(ctx: CanvasRenderingContext2D, el: ShapeElement): void
 		ctx.moveTo(0, 0);
 		ctx.lineTo(el.width, el.height);
 		ctx.stroke();
-	} else {
+	} else if (el.shape === "arrow") {
 		strokeArrow(ctx, 0, 0, el.width, el.height, el.size);
+	} else if (el.vertices && el.vertices.length >= 2) {
+		// "polygon"/"polyline" (voir ShapeElement.vertices, model.ts) : sommets
+		// en fraction de width/height, jamais recalculés ici après un
+		// redimensionnement (déjà résolution-indépendants par construction).
+		ctx.beginPath();
+		ctx.moveTo(el.vertices[0].x * el.width, el.vertices[0].y * el.height);
+		for (let i = 1; i < el.vertices.length; i++) {
+			ctx.lineTo(el.vertices[i].x * el.width, el.vertices[i].y * el.height);
+		}
+		// "polygon" referme la boucle jusqu'au premier sommet ; "polyline"
+		// (chevron, zigzag...) reste ouverte, jamais reliée à son point de
+		// départ.
+		if (el.shape === "polygon") ctx.closePath();
+		ctx.stroke();
 	}
 
 	ctx.restore();
