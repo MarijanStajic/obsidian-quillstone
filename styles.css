@@ -67,6 +67,12 @@
 	cursor: grabbing;
 }
 
+/* Survol d'un lien d'un PDF importé (voir view.ts:updateCursor) : après
+   .is-pan-ready, pour l'emporter sur la main ouverte de l'outil main. */
+.quillstone-canvas-committed.is-link-hover {
+	cursor: pointer;
+}
+
 /* Calque « en cours » (trait en direct / cercle de la gomme) : purement
    visuel, ne doit jamais intercepter le pointeur. */
 .quillstone-canvas-active {
@@ -88,12 +94,56 @@
 	border: 1px dashed var(--interactive-accent);
 	border-radius: 2px;
 	outline: none;
+	/* Jamais la poignée native du navigateur : minuscule et peu fiable au
+	   stylet/tactile (voir le bug signalé) — remplacée par
+	   .quillstone-text-resize-handle, bien plus grande, voir plus bas et
+	   view.ts:onTextResizeHandlePointerDown. */
 	resize: none;
 	overflow: hidden;
+	/* Repli avant que positionTextEditor (view.ts) pose la vraie police de
+	   l'élément en style inline (TextElement.font, voir TEXT_FONT_STACKS) —
+	   cette valeur-ci ne s'affiche donc jamais réellement. */
 	font-family: sans-serif;
 	white-space: pre-wrap;
 	word-break: break-word;
 	z-index: 3;
+}
+
+/*
+ * Poignée de largeur ET hauteur du textarea d'édition (voir
+ * view.ts:TextEditorSession.resizeHandle et onTextResizeHandlePointerMove)
+ * — centrée (translate -50%/-50%) sur le coin bas-droit du textarea (voir
+ * positionTextResizeHandle, qui pose left/top), bien plus grande que la
+ * poignée native du navigateur (~13px, abandonnée) : minuscule et peu
+ * fiable au stylet/tactile (voir le bug signalé). z-index au-dessus du
+ * textarea (3) pour ne jamais se retrouver dessous, quelle que soit sa
+ * position.
+ */
+.quillstone-text-resize-handle {
+	position: absolute;
+	width: 22px;
+	height: 22px;
+	transform: translate(-50%, -50%);
+	border-radius: 6px;
+	background-color: var(--interactive-accent);
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+	cursor: nwse-resize;
+	z-index: 4;
+	/* Empêche le navigateur d'interpréter un glissement tactile comme un
+	   défilement de page : sans ça, tirer la poignée au doigt déplacerait
+	   la vue au lieu de redimensionner la zone de texte. */
+	touch-action: none;
+}
+
+/* Les deux petits traits diagonaux qui signalent "redimensionner" — un dégradé répété plutôt qu'une icône lucide (cette poignée n'est pas un bouton de la barre d'outils, voir .quillstone-dashed-dash pour la même idée ailleurs dans ce fichier). */
+.quillstone-text-resize-handle::before {
+	content: "";
+	position: absolute;
+	inset: 0;
+	margin: auto;
+	width: 10px;
+	height: 10px;
+	background: repeating-linear-gradient(-45deg, #ffffff 0, #ffffff 1.5px, transparent 1.5px, transparent 4px);
 }
 
 /*
@@ -405,6 +455,70 @@
 .quillstone-size-dot {
 	border-radius: 50%;
 	background-color: currentColor;
+}
+
+/* Bouton « trait tillé » (voir DrawView.setDashed) — même boîte que .quillstone-size, juste à côté dans la barre d'outils. */
+.quillstone-dashed-toggle {
+	width: 28px;
+	height: 28px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	border-radius: 4px;
+	color: var(--text-muted);
+}
+
+.quillstone-dashed-toggle:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.quillstone-dashed-toggle.is-active {
+	color: var(--interactive-accent);
+	background-color: var(--background-modifier-active-hover);
+}
+
+/* Le segment tillé lui-même : un trait tracé en CSS plutôt qu'une icône lucide, pour que le motif qu'il annonce se reconnaisse d'un coup d'œil. */
+.quillstone-dashed-dash {
+	width: 18px;
+	height: 0;
+	border-top: 2px dashed currentColor;
+}
+
+/* Bouton de police (voir DrawView.openFontMenu) — même boîte que .quillstone-size/.quillstone-dashed-toggle, mais du texte ("Aa") plutôt qu'une icône ou un motif CSS : ce que ce bouton ouvre (un choix de police) n'a pas d'icône lucide qui le représente sans ambiguïté. */
+.quillstone-font-btn {
+	width: 28px;
+	height: 28px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	border-radius: 4px;
+	color: var(--text-muted);
+	font-size: 12px;
+	font-weight: 600;
+	user-select: none;
+}
+
+.quillstone-font-btn:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+/* Champ numérique de taille de police, en pixels réels (voir DrawView.setFontSizePx) — une vraie valeur tapable au clavier, pas trois boutons préréglés comme .quillstone-size (qui ne concerne plus le texte du tout). */
+.quillstone-font-size-input {
+	width: 48px;
+	height: 28px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	text-align: center;
+	font-size: var(--font-ui-smaller, 0.8em);
+}
+
+.quillstone-font-size-input:focus {
+	border-color: var(--interactive-accent);
+	outline: none;
 }
 
 .quillstone-zoom-reset {

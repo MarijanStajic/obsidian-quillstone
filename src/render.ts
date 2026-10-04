@@ -1,4 +1,4 @@
-import { BackgroundKind, DrawElement, Density, DrawingPage, ImageElement, Pt, ShapeElement, Stroke, StrokeElement, TextAlign, TextElement, newStrokeId } from "./model";
+import { BackgroundKind, DrawElement, Density, DrawingPage, ImageElement, Pt, ShapeElement, Stroke, StrokeElement, TextAlign, TextElement, TextFont, newStrokeId } from "./model";
 
 /**
  * Rendu d'une feuille sur un contexte 2D.
@@ -278,9 +278,40 @@ function paintCurveSegment(ctx: CanvasRenderingContext2D, stroke: Stroke, seg: S
 	ctx.restore();
 }
 
+/** Longueur d'un tiret et d'un espace, en multiple de `Stroke.size` — assez grand pour rester un tiret net même au trait le plus fin, pas assez pour qu'un trait épais ne se résume plus qu'à de gros blocs espacés. */
+const DASH_LENGTH_RATIO = 3;
+const DASH_GAP_RATIO = 2.2;
+/** Plancher en pixels des deux valeurs ci-dessus — sans lui, un trait très fin produirait des tirets sous le pixel, pratiquement un trait plein. */
+const DASH_MIN_PX = 3;
+
+/**
+ * Trait tillé (voir Stroke.dashed) : un seul chemin continu plutôt que les
+ * morceaux de courbe séparés de drawPenStroke — contrairement à eux,
+ * ctx.setLineDash() doit mesurer une distance le long d'un chemin ENTIER
+ * pour garder un motif régulier ; appliqué morceau par morceau, chaque
+ * petit segment redémarrerait son propre motif à zéro et le trait
+ * ressortirait quasi continu. Même renoncement que le surligneur, pour une
+ * raison différente : épaisseur CONSTANTE (jamais modulée par la pression),
+ * puisqu'un seul stroke() ne peut porter qu'un seul lineWidth du début à la
+ * fin — voir tracePath, déjà utilisé pour le chemin unique du surligneur.
+ */
+function drawDashedPenStroke(ctx: CanvasRenderingContext2D, stroke: Stroke): void {
+	const width = stroke.size;
+	ctx.save();
+	applyPenStyle(ctx, stroke, width);
+	ctx.setLineDash([Math.max(DASH_MIN_PX, width * DASH_LENGTH_RATIO), Math.max(DASH_MIN_PX, width * DASH_GAP_RATIO)]);
+	tracePath(ctx, stroke.points);
+	ctx.restore();
+}
+
 function drawPenStroke(ctx: CanvasRenderingContext2D, stroke: Stroke): void {
 	const pts = stroke.points;
 	if (pts.length === 0) return;
+
+	if (stroke.dashed) {
+		drawDashedPenStroke(ctx, stroke);
+		return;
+	}
 
 	if (pts.length === 1) {
 		paintDot(ctx, stroke, pts[0]);
@@ -663,7 +694,15 @@ function drawShapeElement(ctx: CanvasRenderingContext2D, el: ShapeElement): void
 	ctx.lineCap = "round";
 	ctx.lineJoin = "round";
 	ctx.globalAlpha = 1;
-	ctx.setLineDash([]);
+	// Reporté depuis Stroke.dashed quand cette forme vient d'un trait de
+	// stylo tillé reconnu ou redressé (voir ShapeElement.dashed, model.ts,
+	// et view.ts:triggerHoldConversion/buildStraightPolylineShape) — jamais
+	// posé par la palette de formes elle-même. Même formule que
+	// drawDashedPenStroke, pour un tillé visuellement cohérent, qu'il soit
+	// encore un trait ou déjà devenu une forme.
+	ctx.setLineDash(
+		el.dashed ? [Math.max(DASH_MIN_PX, el.size * DASH_LENGTH_RATIO), Math.max(DASH_MIN_PX, el.size * DASH_GAP_RATIO)] : []
+	);
 
 	if (el.shape === "rectangle") {
 		ctx.strokeRect(0, 0, el.width, el.height);
@@ -708,7 +747,7 @@ function drawShapeElement(ctx: CanvasRenderingContext2D, el: ShapeElement): void
 
 // --- Zone de texte -----------------------------------------------------------
 
-/** TextElement.size (2/4/8, comme Stroke.size/ShapeElement.size) -> taille de police réelle en pixels logiques — un peu plus généreux qu'une simple épaisseur de trait (voir le bug signalé : un texte à l'épaisseur par défaut du stylo paraissait trop petit à l'écriture). */
+/** Conversion HISTORIQUE de TextElement.size (2/4/8, comme Stroke.size/ShapeElement.size) vers une taille de police en pixels logiques — un peu plus généreux qu'une simple épaisseur de trait. N'intervient plus que pour un .draw écrit avant TextElement.fontSizePx (voir resolveTextFontSizePx, seule appelante restante) : toute zone de texte créée depuis cette fonctionnalité porte directement sa taille réelle, sans jamais passer par ce facteur. */
 const TEXT_FONT_SCALE = 7;
 /** Exportée : view.ts applique le même interligne au textarea d'édition, pour que la zone éditée corresponde visuellement au rendu final une fois validée. */
 export const TEXT_LINE_HEIGHT_RATIO = 1.3;
@@ -721,14 +760,46 @@ export const TEXT_LINE_HEIGHT_RATIO = 1.3;
 export const TEXT_PADDING_PX = 0;
 /** Largeur (pixels logiques) au-delà de laquelle une zone de texte fraîchement créée (voir view.ts:startTextCreation/finishTextEditing) retourne à la ligne plutôt que de continuer à s'élargir — un texte redimensionné ensuite à la main peut dépasser cette largeur, elle ne s'applique qu'au calcul automatique. */
 export const TEXT_MAX_WIDTH = 480;
-const TEXT_FONT_FAMILY = "sans-serif";
 
+/**
+ * Pile de polices CSS réelle que désigne chaque TextFont (model.ts) —
+ * exportée pour que view.ts applique EXACTEMENT la même chaîne au textarea
+ * d'édition (voir positionTextEditor) : sans cette unique source commune,
+ * la police live pendant la frappe pourrait légèrement différer de celle du
+ * rendu final une fois validée (mêmes largeurs de caractère, donc même
+ * retour à la ligne — voir wrapTextLines, qui mesure avec cette police).
+ * Une seule famille générique par entrée (jamais de liste de repli) :
+ * chacune résout déjà vers une police installée sur n'importe quel appareil
+ * (voir TextFont, model.ts), nul besoin d'alternative.
+ */
+export const TEXT_FONT_STACKS: Record<TextFont, string> = {
+	sans: "sans-serif",
+	serif: "serif",
+	monospace: "monospace",
+	cursive: "cursive",
+};
+
+/** Conversion historique seule (voir TEXT_FONT_SCALE) — n'importe où ailleurs, préférer resolveTextFontSizePx, qui sait aussi reconnaître une taille déjà réelle (TextElement.fontSizePx). */
 export function textFontSize(size: number): number {
 	return size * TEXT_FONT_SCALE;
 }
 
-function textFont(size: number): string {
-	return `${textFontSize(size)}px ${TEXT_FONT_FAMILY}`;
+/**
+ * Taille de police en pixels RÉELS d'une zone de texte — `fontSizePx` s'il
+ * est présent (toute zone créée ou simplement rouverte en édition depuis
+ * cette fonctionnalité, voir view.ts:startTextEditing), sinon l'ancienne
+ * conversion depuis `size` (voir textFontSize/TEXT_FONT_SCALE) pour qu'un
+ * .draw plus ancien continue à s'afficher exactement comme avant. Unique
+ * point d'entrée : tout le reste de ce module (drawTextElement, et par
+ * extension measureTextHeight/measureTextBoxSize via view.ts) travaille
+ * ensuite directement en pixels, sans jamais recalculer cette conversion.
+ */
+export function resolveTextFontSizePx(el: { size: number; fontSizePx?: number }): number {
+	return el.fontSizePx ?? textFontSize(el.size);
+}
+
+function textFont(fontSizePx: number, font: TextFont): string {
+	return `${fontSizePx}px ${TEXT_FONT_STACKS[font]}`;
 }
 
 /** Canvas hors écran dédié à la mesure de texte (ctx.measureText) — jamais affiché, comme colorProbe ci-dessus pour une raison différente (ici, avoir un contexte 2D disponible même hors de tout rendu en cours). */
@@ -770,10 +841,10 @@ export interface WrappedLine {
  * (measureTextHeight) : les deux doivent toujours s'accorder, sans quoi la
  * boîte affichée ne correspondrait plus au texte qu'elle contient.
  */
-export function wrapTextLines(text: string, maxWidth: number, size: number): WrappedLine[] {
+export function wrapTextLines(text: string, maxWidth: number, fontSizePx: number, font: TextFont = "sans"): WrappedLine[] {
 	const ctx = textMeasureCtx();
 	if (!ctx) return text.split("\n").map((line) => ({ text: line, lastOfParagraph: true }));
-	ctx.font = textFont(size);
+	ctx.font = textFont(fontSizePx, font);
 
 	const lines: WrappedLine[] = [];
 	for (const paragraph of text.split("\n")) {
@@ -827,9 +898,9 @@ export function wrapTextLines(text: string, maxWidth: number, size: number): Wra
  * TextElement.height à chaque modification du texte (voir view.ts), jamais
  * une valeur choisie à la main par l'utilisateur.
  */
-export function measureTextHeight(text: string, width: number, size: number): number {
-	const lines = wrapTextLines(text, Math.max(1, width - TEXT_PADDING_PX * 2), size);
-	const lineHeight = textFontSize(size) * TEXT_LINE_HEIGHT_RATIO;
+export function measureTextHeight(text: string, width: number, fontSizePx: number, font: TextFont = "sans"): number {
+	const lines = wrapTextLines(text, Math.max(1, width - TEXT_PADDING_PX * 2), fontSizePx, font);
+	const lineHeight = fontSizePx * TEXT_LINE_HEIGHT_RATIO;
 	return lines.length * lineHeight + TEXT_PADDING_PX * 2;
 }
 
@@ -845,13 +916,18 @@ export function measureTextHeight(text: string, width: number, size: number): nu
  * la modifier : dans les deux cas, seule measureTextHeight recalcule la
  * hauteur à une largeur déjà fixée.
  */
-export function measureTextBoxSize(text: string, size: number, maxWidth: number = TEXT_MAX_WIDTH): { width: number; height: number } {
-	const lines = wrapTextLines(text, maxWidth, size);
-	const lineHeight = textFontSize(size) * TEXT_LINE_HEIGHT_RATIO;
+export function measureTextBoxSize(
+	text: string,
+	fontSizePx: number,
+	maxWidth: number = TEXT_MAX_WIDTH,
+	font: TextFont = "sans"
+): { width: number; height: number } {
+	const lines = wrapTextLines(text, maxWidth, fontSizePx, font);
+	const lineHeight = fontSizePx * TEXT_LINE_HEIGHT_RATIO;
 	const ctx = textMeasureCtx();
-	let width = textFontSize(size); // jamais plus étroite qu'un caractère, pour une boîte tout juste créée sans texte
+	let width = fontSizePx; // jamais plus étroite qu'un caractère, pour une boîte tout juste créée sans texte
 	if (ctx) {
-		ctx.font = textFont(size);
+		ctx.font = textFont(fontSizePx, font);
 		for (const line of lines) width = Math.max(width, ctx.measureText(line.text).width);
 	} else {
 		width = maxWidth;
@@ -910,12 +986,14 @@ function drawTextElement(ctx: CanvasRenderingContext2D, el: TextElement): void {
 	ctx.rect(0, 0, el.width, el.height);
 	ctx.clip();
 
+	const font = el.font ?? "sans";
+	const fontSizePx = resolveTextFontSizePx(el);
 	ctx.fillStyle = el.color;
-	ctx.font = textFont(el.size);
+	ctx.font = textFont(fontSizePx, font);
 	ctx.textBaseline = "top";
 	const align = el.align ?? "left";
-	const lineHeight = textFontSize(el.size) * TEXT_LINE_HEIGHT_RATIO;
-	const lines = wrapTextLines(el.text, Math.max(1, el.width - TEXT_PADDING_PX * 2), el.size);
+	const lineHeight = fontSizePx * TEXT_LINE_HEIGHT_RATIO;
+	const lines = wrapTextLines(el.text, Math.max(1, el.width - TEXT_PADDING_PX * 2), fontSizePx, font);
 	let y = TEXT_PADDING_PX;
 	for (const line of lines) {
 		if (align === "justify" && !line.lastOfParagraph) {

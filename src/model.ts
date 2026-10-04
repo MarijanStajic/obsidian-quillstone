@@ -29,6 +29,19 @@ export interface Stroke {
 	/** Épaisseur de base en pixels, avant modulation par la pression. */
 	size: number;
 	points: Pt[];
+	/**
+	 * Trait tillé plutôt que continu — voir DrawView.setDashed (le bouton de
+	 * la barre d'outils) et render.ts:drawDashedPenStroke pour son rendu.
+	 * Absent (équivalent à `false`) pour tout trait d'avant cette
+	 * fonctionnalité, jamais réinitialisé à la relecture d'un .draw plus
+	 * ancien. N'a de sens que pour `tool: "pen"` : jamais posé sur un trait
+	 * de surligneur (voir DrawView.onPointerDown), dont le rendu en un seul
+	 * chemin continu à pleine opacité — voir render.ts — ne s'y prêterait pas
+	 * aussi proprement. La longueur des tirets n'est pas stockée ici : elle
+	 * se déduit de `size` au rendu, donc redimensionner le trait garde des
+	 * tirets proportionnés sans rien recalculer.
+	 */
+	dashed?: boolean;
 }
 
 /**
@@ -41,6 +54,41 @@ export interface StrokeElement extends Stroke {
 	type: "stroke";
 	/** Verrouillé par l'outil sélection (voir view.ts) : reste sélectionnable, supprimable, copiable et changeable de plan, mais plus déplaçable, redimensionnable ni pivotable. Propriété du document, jamais réinitialisée à la relecture du .draw. */
 	locked?: boolean;
+}
+
+/**
+ * Un lien cliquable d'une page de PDF importée — voir ImageElement.pdfLinks,
+ * qui les porte, et pdf.ts:getPdfPageLinks, qui les extrait à l'import. Soit
+ * externe (`url` : une adresse à ouvrir dans le navigateur), soit interne au
+ * PDF (`targetPdfPage` : un renvoi vers une autre de ses pages — une entrée
+ * de table des matières, un « voir page 12 »...), jamais les deux à la fois.
+ *
+ * Le rectangle cliquable est exprimé en FRACTION (0 à 1) des dimensions de
+ * l'image qui le porte, jamais en pixels — même convention
+ * qu'ImageElement.crop et ShapeElement.vertices, et pour les mêmes raisons :
+ * il reste juste après n'importe quel redimensionnement de la page de PDF
+ * posée sur la feuille, et quelle que soit la résolution à laquelle son
+ * bitmap est rendu d'une session à l'autre (voir imageCache.ts).
+ */
+export interface PdfLink {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	/** Lien externe. Seuls http(s) et mailto sont conservés à l'import (voir pdf.ts) : jamais un `file:` ni un `javascript:` venant d'un PDF dont on ne sait rien. Absent pour un lien interne. */
+	url?: string;
+	/**
+	 * Lien interne : la page du PDF visée, 1-indexée comme
+	 * ImageElement.pdfPage. C'est bien un numéro de page DU PDF, jamais
+	 * l'index d'une page du document .draw : la page vers laquelle faire
+	 * défiler est retrouvée à chaque clic en cherchant celle qui porte ce
+	 * numéro pour ce même PDF (voir view.ts:followPdfLink), ce qui reste
+	 * juste après avoir inséré, déplacé ou supprimé des pages autour —
+	 * contrairement à un index figé à l'import. Absent pour un lien externe.
+	 */
+	targetPdfPage?: number;
+	/** Hauteur visée dans la page de destination, en fraction (0 à 1) de sa hauteur — absent quand la destination ne désigne qu'une page, sans position précise dedans (voir pdf.ts:destinationTop). */
+	targetY?: number;
 }
 
 /**
@@ -89,6 +137,18 @@ export interface ImageElement {
 	 * l'avance.
 	 */
 	pdfPage?: number;
+	/**
+	 * Les liens cliquables de cette page de PDF (voir PdfLink) — absent pour
+	 * une image ordinaire, et pour une page de PDF qui n'en contient aucun
+	 * (ou importée par une version du plugin antérieure à cette
+	 * fonctionnalité : réimporter le PDF les récupère). Extraits UNE SEULE
+	 * FOIS à l'import, depuis les annotations du PDF (voir
+	 * pdf.ts:getPdfPageLinks), puis stockés dans le .draw : aucun clic n'a
+	 * besoin de relire le fichier PDF pour savoir où il mène. Ils suivent
+	 * l'image comme son rognage ou sa rotation — la supprimer (gomme,
+	 * sélection) emporte ses liens avec elle.
+	 */
+	pdfLinks?: PdfLink[];
 	x: number;
 	y: number;
 	width: number;
@@ -180,10 +240,34 @@ export interface ShapeElement {
 	 * render.ts:drawShapeElement), "polyline" jamais.
 	 */
 	vertices?: { x: number; y: number }[];
+	/**
+	 * Contour tillé plutôt que continu — jamais posé par la palette de
+	 * formes (qui n'a pas ce réglage), uniquement reporté depuis
+	 * Stroke.dashed quand un trait de stylo tillé est RECONNU comme une
+	 * forme (rond, rectangle, étoile, ligne brisée...) après un maintien
+	 * immobile, ou redressé en ligne droite à plusieurs segments (voir
+	 * view.ts:triggerHoldConversion/buildStraightPolylineShape) — sans ce
+	 * report, le trait tillé d'origine se retrouvait purement et simplement
+	 * remplacé par une forme à contour plein (voir le bug signalé). Absent
+	 * équivaut à `false`, comme pour Stroke.dashed.
+	 */
+	dashed?: boolean;
 }
 
 /** Alignement horizontal du texte à l'intérieur de sa boîte — voir TextElement.align, render.ts:drawTextElement. "justify" étire chaque ligne pour remplir toute la largeur en espaçant ses mots, SAUF la dernière ligne d'un paragraphe (retour à la ligne saisi par l'utilisateur, ou toute dernière ligne du texte) — comme dans n'importe quel traitement de texte, jamais la dernière ligne d'un bloc justifié. */
 export type TextAlign = "left" | "center" | "right" | "justify";
+
+/**
+ * Police d'une zone de texte — voir TextElement.font, render.ts:TEXT_FONT_STACKS
+ * pour la pile de polices CSS réelle que chacune désigne. Des familles
+ * GÉNÉRIQUES CSS (jamais un nom de police précis) : elles résolvent vers
+ * une police réellement installée sur l'appareil, quel qu'il soit, sans
+ * jamais dépendre d'une police embarquée à télécharger ni d'un nom qui
+ * n'existerait pas partout — cohérent avec le reste du plugin, qui ne
+ * dépend d'aucune ressource externe (voir pdf.ts, par exemple, qui embarque
+ * même le Worker pdf.js plutôt que de compter sur un fichier séparé).
+ */
+export type TextFont = "sans" | "serif" | "monospace" | "cursive";
 
 /**
  * Une zone de texte tapée au clavier, posée sur la feuille — voir
@@ -212,14 +296,48 @@ export interface TextElement {
 	type: "text";
 	x: number;
 	y: number;
+	/**
+	 * Redimensionnables comme n'importe quel élément (voir
+	 * DrawView.scaleElement) : suivent la poignée tirée, pour reflouer le
+	 * texte sur une largeur différente ou lui laisser plus/moins d'espace
+	 * vertical — mais, contrairement à une forme, JAMAIS en modifiant
+	 * `fontSizePx` au passage (demandé explicitement) : étirer la boîte ne
+	 * doit jamais, de force, agrandir ou réduire le texte lui-même. Les
+	 * deux se règlent désormais indépendamment l'un de l'autre.
+	 */
 	width: number;
 	height: number;
 	rotation: number;
 	color: string;
+	/**
+	 * HISTORIQUE : avant `fontSizePx` (voir ci-dessous), c'était ce champ —
+	 * partagé avec Stroke.size/ShapeElement.size, donc avec les mêmes trois
+	 * boutons d'épaisseur 2/4/8 que le stylo — qui, multiplié par un facteur
+	 * fixe (voir render.ts:TEXT_FONT_SCALE), donnait la taille de police
+	 * réelle. Toujours lu en repli pour un .draw écrit avant `fontSizePx`
+	 * (voir render.ts:resolveTextFontSizePx), jamais mis à jour par un
+	 * nouvel enregistrement : une zone de texte ouverte en édition migre
+	 * silencieusement vers `fontSizePx` dès ce moment-là (voir
+	 * DrawView.startTextEditing), même si sa taille affichée ne change pas
+	 * d'un pixel.
+	 */
 	size: number;
+	/**
+	 * Taille de police en pixels RÉELS — modifiable directement (voir
+	 * DrawView.setFontSizePx, le champ numérique de la barre d'outils),
+	 * jamais plus couplée à l'épaisseur du stylo/surligneur/contour d'une
+	 * forme comme l'était `size` (voir sa doc juste au-dessus). Absent pour
+	 * une zone de texte écrite avant l'ajout de cette fonctionnalité : voir
+	 * render.ts:resolveTextFontSizePx, qui retombe alors sur l'ancienne
+	 * conversion depuis `size`, pour qu'elle continue à s'afficher
+	 * exactement comme avant.
+	 */
+	fontSizePx?: number;
 	text: string;
 	/** Absent équivaut à "left" (voir render.ts) — jamais réinitialisé à la relecture d'un .draw écrit par une version antérieure du plugin, qui n'avait pas ce champ. */
 	align?: TextAlign;
+	/** Absent équivaut à "sans" (voir render.ts:TEXT_FONT_STACKS) — même raison que `align` ci-dessus : un .draw écrit par une version antérieure du plugin, sans ce champ, doit continuer à s'afficher exactement comme avant son ajout. */
+	font?: TextFont;
 	/** Verrouillé par l'outil sélection — même comportement que StrokeElement.locked/ImageElement.locked. */
 	locked?: boolean;
 }

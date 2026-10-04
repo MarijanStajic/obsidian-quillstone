@@ -18,7 +18,7 @@ import { Drawing, DrawingPage, createEmptyDrawing, newPdfSourceId, newStrokeId, 
 import { ActiveTool, DEFAULT_SETTINGS, QuillStoneSettingTab, QuillStoneSettings, mergeSettings } from "./settings";
 import { DrawPreviewManager, parseEmbedWidth } from "./preview";
 import { DrawEmbedLifecycle } from "./previewLifecycle";
-import { configurePdfWorker, getPdfPageSize, loadPdfDocument } from "./pdf";
+import { configurePdfWorker, getPdfPageLinks, getPdfPageSize, loadPdfDocument } from "./pdf";
 import { pickFile } from "./filePicker";
 import { chooseDrawingFolder } from "./folderChoiceModal";
 import { promptDrawingName } from "./nameDrawingModal";
@@ -478,6 +478,11 @@ export default class QuillStonePlugin extends Plugin {
 			for (let i = 1; i <= doc.numPages; i++) {
 				notice?.setMessage(`Importing PDF… page ${i}/${doc.numPages}`);
 				const { width, height } = await getPdfPageSize(doc, i);
+				// Les liens de la page (table des matières, renvois internes,
+				// adresses web) sont extraits ici, une fois pour toutes, et
+				// voyagent avec l'image de fond — voir ImageElement.pdfLinks
+				// (model.ts) et view.ts:followPdfLink, qui les rend cliquables.
+				const pdfLinks = await getPdfPageLinks(doc, i);
 				pages.push({
 					width,
 					height,
@@ -496,6 +501,7 @@ export default class QuillStonePlugin extends Plugin {
 							height,
 							rotation: 0,
 							locked: true,
+							...(pdfLinks.length > 0 && { pdfLinks }),
 						},
 					],
 				});

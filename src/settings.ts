@@ -1,6 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type QuillStonePlugin from "./main";
-import { BackgroundKind, Density, Orientation, PaperFormat, ShapeKind, TextAlign } from "./model";
+import { BackgroundKind, Density, Orientation, PaperFormat, ShapeKind, TextAlign, TextFont } from "./model";
 import { openColorPicker } from "./colorPicker";
 
 /**
@@ -155,8 +155,21 @@ export interface QuillStoneSettings {
 	defaultTool: DefaultTool;
 	colors: ToolColorSettings;
 	size: number;
+	/**
+	 * Dernier état choisi du bouton « trait tillé » de la barre d'outils
+	 * (voir DrawView.setDashed) — comme `size`, le réglage courant plutôt
+	 * qu'une propriété du document : il ne s'applique qu'AU PROCHAIN trait
+	 * tracé avec le stylo (jamais au surligneur, voir
+	 * DrawView.onPointerDown), jamais rétroactivement à ceux déjà posés,
+	 * qui gardent leur propre `Stroke.dashed`.
+	 */
+	dashed: boolean;
 	/** Alignement appliqué à une NOUVELLE zone de texte (voir DrawView.startTextCreation) — le dernier choisi dans la barre d'outils, comme `size`/`colors` pour le stylo. Une zone déjà posée garde le sien propre (TextElement.align), jamais mis à jour rétroactivement par un changement de ce réglage. */
 	textAlign: TextAlign;
+	/** Police appliquée à une NOUVELLE zone de texte — même principe que `textAlign` juste au-dessus : le dernier choix dans la barre d'outils, jamais rétroactif sur une zone déjà posée (TextElement.font). */
+	font: TextFont;
+	/** Taille de police en pixels réels appliquée à une NOUVELLE zone de texte (voir TextElement.fontSizePx) — le dernier choix dans le champ numérique de la barre d'outils, jamais partagé avec `size` (l'épaisseur du stylo/surligneur/contour d'une forme) ni rétroactif sur une zone déjà posée. */
+	fontSizePx: number;
 	/**
 	 * Réordonne le rendu pour que les surligneurs passent toujours sous le
 	 * stylo, quel que soit l'ordre de création. Désactivé par défaut : l'ordre
@@ -199,6 +212,20 @@ export interface QuillStoneSettings {
 	/** Durée d'immobilité (ms) avant la conversion en ligne droite. */
 	straightenHoldDelayMs: number;
 	/**
+	 * Après avoir tracé une forme avec la palette, OU après qu'un tracé au
+	 * stylo/surligneur maintenu immobile soit reconnu comme une forme (voir
+	 * DrawView.triggerHoldConversion), bascule automatiquement sur l'outil
+	 * sélection, la forme déjà sélectionnée, pour pouvoir la repositionner/
+	 * redimensionner tout de suite (voir DrawView.selectNewlyCreatedShape).
+	 * Désactivable : reste alors sur l'outil de dessin actif, sans rien
+	 * sélectionner, pour continuer à tracer sans interruption — demandé
+	 * explicitement par qui enchaîne beaucoup de formes reconnues à la
+	 * suite et ne veut jamais que la main lui soit retirée entre deux.
+	 * Activé par défaut : repositionner/redimensionner juste après reste
+	 * le geste le plus courant pour une seule forme isolée.
+	 */
+	autoSelectShapeAfterCreate: boolean;
+	/**
 	 * Vrai dès que l'avertissement Scribble (voir main.ts:onload) a été
 	 * affiché une fois — jamais réaffiché ensuite, y compris après une mise à
 	 * jour ou une réinstallation de l'app. Absent pour un utilisateur déjà
@@ -223,7 +250,10 @@ export const DEFAULT_SETTINGS: QuillStoneSettings = {
 		},
 	},
 	size: 4,
+	dashed: false,
 	textAlign: "left",
+	font: "sans",
+	fontSizePx: 28,
 	highlighterAlwaysBehind: false,
 	paperAlwaysLight: true,
 	defaultBackground: "grid",
@@ -232,6 +262,7 @@ export const DEFAULT_SETTINGS: QuillStoneSettings = {
 	newPageOrientation: "portrait",
 	straightenOnHold: true,
 	straightenHoldDelayMs: 600,
+	autoSelectShapeAfterCreate: true,
 	hasShownScribbleNotice: false,
 };
 
@@ -389,6 +420,18 @@ export class QuillStoneSettingTab extends PluginSettingTab {
 						this.plugin.settings.straightenHoldDelayMs = value;
 						await this.plugin.saveSettings();
 					})
+			);
+
+		new Setting(containerEl)
+			.setName("Switch to selection after drawing a shape")
+			.setDesc(
+				"After drawing a shape from the palette, or after a held stroke is recognized as one (circle, rectangle, star, zigzag...), switch to the selection tool with it already selected, ready to reposition or resize. Disable this to go straight back to the pen instead (or stay on the pen/highlighter that drew it, for a recognized shape), so you can keep writing or tracing shapes back-to-back without the tool switching away each time."
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.autoSelectShapeAfterCreate).onChange(async (value) => {
+					this.plugin.settings.autoSelectShapeAfterCreate = value;
+					await this.plugin.saveSettings();
+				})
 			);
 
 		this.displayColorSection(containerEl);
