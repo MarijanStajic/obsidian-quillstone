@@ -147,6 +147,39 @@
 }
 
 /*
+ * Poignée de déplacement du textarea d'édition (voir
+ * view.ts:TextEditorSession.moveHandle) — même gabarit que la poignée de
+ * redimensionnement, centrée sur le coin haut-gauche.
+ */
+.quillstone-text-move-handle {
+	position: absolute;
+	width: 22px;
+	height: 22px;
+	transform: translate(-50%, -50%);
+	border-radius: 6px;
+	background-color: var(--interactive-accent);
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+	cursor: move;
+	z-index: 4;
+	touch-action: none;
+}
+
+/* Quatre petits points en croix qui signalent "déplacer". */
+.quillstone-text-move-handle::before {
+	content: "";
+	position: absolute;
+	inset: 0;
+	margin: auto;
+	width: 12px;
+	height: 12px;
+	background:
+		radial-gradient(circle, #ffffff 1.5px, transparent 2px) 50% 0 / 4px 4px no-repeat,
+		radial-gradient(circle, #ffffff 1.5px, transparent 2px) 50% 100% / 4px 4px no-repeat,
+		radial-gradient(circle, #ffffff 1.5px, transparent 2px) 0 50% / 4px 4px no-repeat,
+		radial-gradient(circle, #ffffff 1.5px, transparent 2px) 100% 50% / 4px 4px no-repeat;
+}
+
+/*
  * Bouton rond « + » : un par page, toujours centré dans l'interstice sous
  * elle (voir DrawView.addPageBtns/syncAddPageButtons), y compris sous la
  * toute dernière — repositionné à chaque redessin du volet, jamais fixe dans

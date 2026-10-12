@@ -118,6 +118,22 @@ export const VIEW_TYPE_DRAW = "quillstone-view";
  */
 const STYLUS_LIKE_CONTACT_MAX_PX = 10;
 
+/**
+ * Rejet de paume (voir DrawView.palmCandidates) : un doigt posé sur une
+ * feuille après usage du stylet est d'abord présumé paume, puis "promu" en
+ * défilement à un doigt s'il glisse d'au moins PALM_PROMOTE_DISTANCE_PX
+ * (repère écran) — à condition que le stylet n'ait plus touché l'écran
+ * depuis au moins PALM_PEN_QUIET_MS au moment où ce doigt s'est posé, ni
+ * pendant toute sa durée de contact. Une paume qui se repose en écrivant
+ * arrive juste après (ou pendant) un trait ; un défilement volontaire, lui,
+ * vient après une pause, le stylet relevé. PALM_MAX_CONTACT_PX : un contact
+ * plus large que ça (quand l'appareil rapporte sa géométrie) est une paume
+ * à coup sûr, jamais promu.
+ */
+const PALM_PROMOTE_DISTANCE_PX = 24;
+const PALM_PEN_QUIET_MS = 500;
+const PALM_MAX_CONTACT_PX = 50;
+
 /** Le surligneur est délibérément plus épais que le stylo pour la même épaisseur choisie. */
 const HIGHLIGHTER_SIZE_MULTIPLIER = 3;
 
@@ -452,6 +468,9 @@ interface PdfLinkHit {
 type ResizeHandle = "nw" | "n" | "ne" | "w" | "e" | "sw" | "s" | "se";
 const RESIZE_HANDLES: ResizeHandle[] = ["nw", "n", "ne", "w", "e", "sw", "s", "se"];
 /** Pour chaque poignée, quels axes elle fait varier (-1 = bord gauche/haut mobile, 1 = bord droit/bas mobile, 0 = axe verrouillé). */
+/** En dessous de cette étendue (repère de page), un axe de la sélection est considéré "plat" et n'est jamais mis à l'échelle par une poignée (voir computeResize) — même valeur que le plancher de newWidth/newHeight : un axe plus petit serait sinon étiré d'un coup jusqu'à ce plancher dès le premier pixel de glissement. */
+const SELECTION_FLAT_AXIS_PX = 4;
+
 const HANDLE_AXES: Record<ResizeHandle, { x: -1 | 0 | 1; y: -1 | 0 | 1 }> = {
 	nw: { x: -1, y: -1 },
 	n: { x: 0, y: -1 },
@@ -983,6 +1002,8 @@ interface TextEditorSession {
 	 * au-delà de cette session.
 	 */
 	resizeHandle: HTMLDivElement;
+	/** Poignée de déplacement, au coin haut-gauche du textarea (voir onTextMoveHandlePointerDown) : déplacer la zone SANS quitter l'édition — le textarea lui-même réserve le glisser à la sélection de texte. */
+	moveHandle: HTMLDivElement;
 }
 
 /**
@@ -990,6 +1011,15 @@ interface TextEditorSession {
  * pointerdown, comme ScrollbarDrag : `startWidth` en unités de page (pas en
  * pixels écran), pour ne jamais dépendre du zoom pendant le calcul du delta.
  */
+/** Glissement en cours sur moveHandle (voir TextEditorSession) — position de la zone (repère de page) figée au pointerdown. */
+interface TextMoveDrag {
+	pointerId: number;
+	startClientX: number;
+	startClientY: number;
+	startX: number;
+	startY: number;
+}
+
 interface TextResizeDrag {
 	pointerId: number;
 	startClientX: number;
@@ -1163,6 +1193,17 @@ export class DrawView extends TextFileView {
 	private textAreaResizeScheduled = false;
 	/** Glissement en cours sur la poignée de largeur du textarea d'édition (voir TextResizeDrag, onTextResizeHandlePointerDown) — `null` hors glissement. */
 	private textResizeDrag: TextResizeDrag | null = null;
+	/** Glissement en cours sur la poignée de déplacement du textarea d'édition (voir TextMoveDrag) — `null` hors glissement. */
+	private textMoveDrag: TextMoveDrag | null = null;
+	/**
+	 * Clic de l'outil texte sur une zone de texte EXISTANTE (voir
+	 * onPointerDown) : le geste démarre comme un déplacement (même
+	 * TransformSession que le lasso/curseur), et ne se résout en réouverture
+	 * de l'édition qu'au relâchement, si le pointeur n'a pas dépassé
+	 * TEXT_DRAG_MIN_SCREEN_PX — sans ça, la zone ne pouvait se déplacer
+	 * qu'en changeant d'outil (voir la fonctionnalité demandée).
+	 */
+	private textToolPress: { pageIndex: number; elementId: string; startClientX: number; startClientY: number } | null = null;
 	/** Boîte de texte en cours de glissement avec l'outil "text" (voir updateActiveTextBox) — même principe qu'activeShape, mais seule sa LARGEUR survit à finishTextBoxCreation (voir sa doc) : la hauteur, elle, suit toujours le texte tapé. */
 	private activeTextBox: { x: number; y: number; width: number; height: number } | null = null;
 	private activeTextBoxPageIndex: number | null = null;
@@ -1235,6 +1276,15 @@ export class DrawView extends TextFileView {
 	 */
 	private penModeActive = false;
 	private ignoredPointerIds = new Set<number>();
+	/** Dernier contact du stylet avec l'écran (pointerdown, glissement, relâchement — jamais un simple survol), en performance.now() — voir PALM_PEN_QUIET_MS. */
+	private lastPenContactTime = -Infinity;
+	/**
+	 * Doigts présumés paume (voir onPointerDown, et ignoredPointerIds qui les
+	 * contient aussi) encore susceptibles d'être promus en défilement à un
+	 * doigt (voir maybePromotePalmCandidate) — `eligible` repasse à faux pour
+	 * de bon dès que le stylet touche l'écran pendant leur contact.
+	 */
+	private palmCandidates = new Map<number, { startClientX: number; startClientY: number; eligible: boolean }>();
 
 	/** Appui tactile immobile en cours, en vue d'ouvrir le menu contextuel (voir armLongPressMenu) — coordonnées écran, pas repère document : ce minuteur ne dessine rien, il ne fait que positionner un menu. */
 	private longPressMenuTimer: number | null = null;
@@ -3829,6 +3879,43 @@ export class DrawView extends TextFileView {
 	 * ignoredPointerIds pour que son pointerup, quand il viendra, ne fasse
 	 * plus rien (voir onPointerMove/onPointerUp).
 	 */
+	/** Le stylet touche l'écran : horodate ce contact (voir PALM_PEN_QUIET_MS) et retire pour de bon toute chance de promotion aux doigts présumés paume encore posés. */
+	private notePenContact(): void {
+		this.lastPenContactTime = performance.now();
+		for (const candidate of this.palmCandidates.values()) candidate.eligible = false;
+	}
+
+	/**
+	 * Doigt présumé paume (voir palmCandidates) qui glisse franchement alors
+	 * que le stylet est au repos : c'était un défilement volontaire, pas une
+	 * paume — il quitte ignoredPointerIds et démarre un panoramique à un
+	 * doigt depuis sa position COURANTE (aucun saut de la vue). Sans ça, dès
+	 * le premier trait au stylet, plus aucun doigt ne pouvait faire défiler
+	 * la feuille (voir le bug signalé) ; le pincement à deux doigts, lui,
+	 * était déjà rattrapé dans onPointerDown. Vrai si le doigt vient d'être
+	 * promu (onPointerMove continue alors normalement avec cet événement).
+	 */
+	private maybePromotePalmCandidate(event: PointerEvent): boolean {
+		const candidate = this.palmCandidates.get(event.pointerId);
+		if (!candidate || !candidate.eligible) return false;
+		if (Math.max(event.width || 0, event.height || 0) > PALM_MAX_CONTACT_PX) {
+			candidate.eligible = false;
+			return false;
+		}
+		if (this.activePointerId !== null || this.viewportGesture) return false;
+		const dist = Math.hypot(event.clientX - candidate.startClientX, event.clientY - candidate.startClientY);
+		if (dist < PALM_PROMOTE_DISTANCE_PX) return false;
+
+		this.palmCandidates.delete(event.pointerId);
+		this.ignoredPointerIds.delete(event.pointerId);
+		this.pointers.set(event.pointerId, event);
+		// Un seul doigt "réel" à la fois ici : un second, s'il y en avait un,
+		// aurait déjà déclenché le pincement dans onPointerDown.
+		if (this.countActiveTouches() !== 1) return true;
+		this.startPanGesture(event, false);
+		return true;
+	}
+
 	private preemptStrayTouchPan(): void {
 		const gesture = this.viewportGesture;
 		if (!gesture || gesture.type !== "pan") return;
@@ -5687,6 +5774,7 @@ export class DrawView extends TextFileView {
 			// utilisable au doigt pour défiler (voir plus bas) : y poser un
 			// doigt ne peut jamais être une paume qui se repose en écrivant.
 			this.penModeActive = true;
+			this.notePenContact();
 			// Le stylet a toujours priorité sur un panoramique à un seul doigt en
 			// cours : ce doigt qui traîne encore au moment où le stylet retouche
 			// l'écran est presque toujours la paume qui se pose entre deux mots,
@@ -5735,9 +5823,21 @@ export class DrawView extends TextFileView {
 			).length;
 			if (touchesDown < 2) {
 				this.ignoredPointerIds.add(event.pointerId);
+				// Candidat à un défilement à un doigt (voir
+				// maybePromotePalmCandidate) — jamais si le stylet est en train
+				// d'écrire ou vient tout juste de se relever : c'est alors
+				// presque toujours la main qui se repose.
+				const penQuiet =
+					this.activePointerId === null && performance.now() - this.lastPenContactTime >= PALM_PEN_QUIET_MS;
+				this.palmCandidates.set(event.pointerId, {
+					startClientX: event.clientX,
+					startClientY: event.clientY,
+					eligible: penQuiet,
+				});
 				return;
 			}
 			for (const id of this.pointers.keys()) this.ignoredPointerIds.delete(id);
+			this.palmCandidates.clear();
 		}
 
 		this.committedCanvas.setPointerCapture(event.pointerId);
@@ -5855,7 +5955,11 @@ export class DrawView extends TextFileView {
 			// onDoubleClick) fait la même chose avec n'importe quel autre outil.
 			const hit = this.hitTestElementAt(pageIndex, x, y);
 			if (hit && hit.type === "text" && !hit.locked) {
-				this.startTextEditing(pageIndex, hit, false);
+				// Glisser déplace la zone, un simple clic rouvre son édition au
+				// relâchement (voir textToolPress, résolu dans onPointerUp).
+				this.setSelection(pageIndex, [hit.id]);
+				this.textToolPress = { pageIndex, elementId: hit.id, startClientX: event.clientX, startClientY: event.clientY };
+				this.startTransform(pageIndex, "move", [x, y]);
 				return;
 			}
 
@@ -5958,7 +6062,8 @@ export class DrawView extends TextFileView {
 	};
 
 	private onPointerMove = (event: PointerEvent): void => {
-		if (this.ignoredPointerIds.has(event.pointerId)) return;
+		if ((event.pointerType === "pen" || this.isStylusLikeTouch(event)) && event.buttons !== 0) this.notePenContact();
+		if (this.ignoredPointerIds.has(event.pointerId) && !this.maybePromotePalmCandidate(event)) return;
 		if (this.pointers.has(event.pointerId)) this.pointers.set(event.pointerId, event);
 
 		// Survol (souris/stylet seulement — voir hoveredPageIndex) pour
@@ -6129,7 +6234,9 @@ export class DrawView extends TextFileView {
 	};
 
 	private onPointerUp = (event: PointerEvent): void => {
+		if (event.pointerType === "pen" || this.isStylusLikeTouch(event)) this.notePenContact();
 		this.ignoredPointerIds.delete(event.pointerId);
+		this.palmCandidates.delete(event.pointerId);
 		this.pointers.delete(event.pointerId);
 		this.clearLongPressMenu();
 
@@ -6162,9 +6269,11 @@ export class DrawView extends TextFileView {
 			const session = this.transformSession;
 			const [docX, docY] = this.eventToXY(event, rect);
 			const [x, y] = this.toPageLocal(session.pageIndex, docX, docY);
+			this.activePointerId = null;
+			if (this.resolveTextToolPress(event)) return;
 			this.updateTransform([x, y], event.shiftKey);
 			this.commitTransform();
-			this.activePointerId = null;
+			if (this.plugin.settings.tool === "text") this.clearSelection();
 			return;
 		}
 
@@ -6232,6 +6341,7 @@ export class DrawView extends TextFileView {
 
 	private onPointerCancel = (event: PointerEvent): void => {
 		this.ignoredPointerIds.delete(event.pointerId);
+		this.palmCandidates.delete(event.pointerId);
 		this.pointers.delete(event.pointerId);
 		this.clearLongPressMenu();
 
@@ -6682,6 +6792,12 @@ export class DrawView extends TextFileView {
 		resizeHandle.addEventListener("pointerup", this.onTextResizeHandlePointerUp);
 		resizeHandle.addEventListener("pointercancel", this.onTextResizeHandlePointerUp);
 
+		const moveHandle = this.wrapper.createDiv({ cls: "quillstone-text-move-handle" });
+		moveHandle.addEventListener("pointerdown", this.onTextMoveHandlePointerDown);
+		moveHandle.addEventListener("pointermove", this.onTextMoveHandlePointerMove);
+		moveHandle.addEventListener("pointerup", this.onTextMoveHandlePointerUp);
+		moveHandle.addEventListener("pointercancel", this.onTextMoveHandlePointerUp);
+
 		this.textEditor = {
 			ta,
 			pageIndex,
@@ -6689,6 +6805,7 @@ export class DrawView extends TextFileView {
 			draft,
 			autoFitWidth,
 			resizeHandle,
+			moveHandle,
 		};
 		this.positionTextEditor(pageIndex, element);
 		this.positionTextResizeHandle();
@@ -6783,6 +6900,10 @@ export class DrawView extends TextFileView {
 			left: `${session.ta.offsetLeft + session.ta.offsetWidth}px`,
 			top: `${session.ta.offsetTop + session.ta.offsetHeight}px`,
 		});
+		session.moveHandle.setCssStyles({
+			left: `${session.ta.offsetLeft}px`,
+			top: `${session.ta.offsetTop}px`,
+		});
 	}
 
 	/**
@@ -6847,6 +6968,42 @@ export class DrawView extends TextFileView {
 		this.textResizeDrag = null;
 	};
 
+	/** pointerdown sur moveHandle : même mécanique que resizeHandle (capture sur la poignée elle-même, preventDefault pour que le textarea garde le focus). */
+	private onTextMoveHandlePointerDown = (event: PointerEvent): void => {
+		if (!this.textEditor || event.button !== 0) return;
+		event.preventDefault();
+		event.stopPropagation();
+		this.textEditor.moveHandle.setPointerCapture(event.pointerId);
+		this.textMoveDrag = {
+			pointerId: event.pointerId,
+			startClientX: event.clientX,
+			startClientY: event.clientY,
+			startX: this.textEditor.draft.x,
+			startY: this.textEditor.draft.y,
+		};
+	};
+
+	/** Déplace draft.x/y (repère de page, bornés à la feuille comme tout autre élément) et recale le textarea et ses deux poignées. Le déplacement n'est enregistré qu'à la validation (voir finishTextEditing), avec le reste de l'édition. */
+	private onTextMoveHandlePointerMove = (event: PointerEvent): void => {
+		const drag = this.textMoveDrag;
+		const session = this.textEditor;
+		if (!drag || !session || event.pointerId !== drag.pointerId) return;
+		event.preventDefault();
+		const page = this.pages[session.pageIndex].page;
+		const scale = this.viewport.scale;
+		const boxHeight = session.ta.offsetHeight / scale;
+		session.draft.x = clamp(drag.startX + (event.clientX - drag.startClientX) / scale, 0, Math.max(0, page.width - session.draft.width));
+		session.draft.y = clamp(drag.startY + (event.clientY - drag.startClientY) / scale, 0, Math.max(0, page.height - boxHeight));
+		const [sx, sy] = this.pageToScreen(session.pageIndex, session.draft.x, session.draft.y);
+		session.ta.setCssStyles({ left: `${sx}px`, top: `${sy}px` });
+		this.positionTextResizeHandle();
+	};
+
+	private onTextMoveHandlePointerUp = (event: PointerEvent): void => {
+		if (!this.textMoveDrag || event.pointerId !== this.textMoveDrag.pointerId) return;
+		this.textMoveDrag = null;
+	};
+
 	/** Position/taille/police/alignement du textarea, en repère écran — recalculée une seule fois à l'ouverture (voir startTextEditing) : un panoramique/zoom pendant l'édition n'est pas suivi, cas limite accepté pour cette première version. */
 	private positionTextEditor(pageIndex: number, element: TextElement): void {
 		const ta = this.textEditor?.ta;
@@ -6888,7 +7045,9 @@ export class DrawView extends TextFileView {
 		if (!session) return;
 		this.textEditor = null;
 		this.textResizeDrag = null; // un glissement de resizeHandle encore en cours n'a plus de poignée à suivre
+		this.textMoveDrag = null;
 		session.resizeHandle.remove();
+		session.moveHandle.remove();
 		session.ta.remove();
 		// this.textEditor déjà nul : pageElementsForRender ne filtre plus rien,
 		// ce qui réaffiche aussitôt la boîte d'origine, inchangée, qu'elle
@@ -6997,7 +7156,9 @@ export class DrawView extends TextFileView {
 			font !== (original.font ?? "sans") ||
 			fontSizePx !== resolveTextFontSizePx(original) ||
 			width !== original.width ||
-			draftHeight !== original.height
+			draftHeight !== original.height ||
+			session.draft.x !== original.x ||
+			session.draft.y !== original.y
 		) {
 			// Comme pour une création (voir plus haut) : la hauteur recalculée
 			// ne descend JAMAIS sous celle déjà affichée OU déjà tirée à la
@@ -7012,6 +7173,8 @@ export class DrawView extends TextFileView {
 				align,
 				font,
 				fontSizePx,
+				x: session.draft.x,
+				y: session.draft.y,
 				width,
 				height,
 			};
@@ -8212,6 +8375,14 @@ export class DrawView extends TextFileView {
 		const { minX, minY, maxX, maxY } = session.originalBounds;
 		const origWidth = Math.max(1e-6, maxX - minX);
 		const origHeight = Math.max(1e-6, maxY - minY);
+		// Axe "plat" (une ligne droite parfaitement horizontale ou verticale,
+		// un simple point) : aucune étendue à mettre à l'échelle sur cet axe.
+		// Sans ce garde-fou, newHeight / origHeight (plancher de 4 sur 1e-6)
+		// donnait un facteur de plusieurs millions, repris par sizeScale plus
+		// bas : l'épaisseur du trait explosait et recouvrait toute la page de
+		// sa couleur (voir le bug signalé : "la page devient noire").
+		const flatX = maxX - minX < SELECTION_FLAT_AXIS_PX;
+		const flatY = maxY - minY < SELECTION_FLAT_AXIS_PX;
 
 		const anchorX = axes.x === 1 ? minX : maxX;
 		const anchorY = axes.y === 1 ? minY : maxY;
@@ -8220,17 +8391,18 @@ export class DrawView extends TextFileView {
 		const newWidth = Math.max(4, rawWidth);
 		const newHeight = Math.max(4, rawHeight);
 
-		let sx = axes.x === 0 ? 1 : newWidth / origWidth;
-		let sy = axes.y === 0 ? 1 : newHeight / origHeight;
+		let sx = axes.x === 0 || flatX ? 1 : newWidth / origWidth;
+		let sy = axes.y === 0 || flatY ? 1 : newHeight / origHeight;
 
-		if (shiftKey && axes.x !== 0 && axes.y !== 0) {
+		if (shiftKey && axes.x !== 0 && axes.y !== 0 && !flatX && !flatY) {
 			const s = Math.max(sx, sy);
 			sx = s;
 			sy = s;
 		}
 
 		// Une mise à l'échelle affecte aussi l'épaisseur des traits (voir scaleElement) : sinon un texte réduit garderait des traits épais et deviendrait illisible.
-		const sizeScale = Math.sqrt(Math.abs(sx * sy)) || 1;
+		// Un axe plat n'entre jamais dans ce calcul (son facteur, forcé à 1, ne dirait rien de l'agrandissement réel) : seul l'axe qui a une vraie étendue compte.
+		const sizeScale = (flatX && flatY ? 1 : flatX ? Math.abs(sy) : flatY ? Math.abs(sx) : Math.sqrt(Math.abs(sx * sy))) || 1;
 		return session.snapshot.map((el) => this.scaleElement(el, anchorX, anchorY, sx, sy, sizeScale));
 	}
 
@@ -8440,7 +8612,32 @@ export class DrawView extends TextFileView {
 		this.render(fromPage);
 	}
 
+	/**
+	 * Fin d'un geste de l'outil texte commencé sur une zone existante (voir
+	 * textToolPress) : sans glissement réel, c'était un clic — rouvre
+	 * l'édition comme avant ; après un vrai déplacement, la zone reste là où
+	 * on l'a lâchée. Dans les deux cas, la sélection temporaire posée pour
+	 * le déplacement disparaît : l'outil texte n'en affiche jamais en dehors
+	 * de ce geste (voir onPointerUp). Vrai si le geste était un clic, déjà
+	 * entièrement traité ici : le léger tremblement éventuel n'est alors
+	 * jamais enregistré comme un déplacement.
+	 */
+	private resolveTextToolPress(event: PointerEvent): boolean {
+		const press = this.textToolPress;
+		this.textToolPress = null;
+		if (!press) return false;
+		const moved = Math.hypot(event.clientX - press.startClientX, event.clientY - press.startClientY) >= TEXT_DRAG_MIN_SCREEN_PX;
+		if (moved) return false;
+		this.cancelTransform();
+		this.clearSelection();
+		const el = this.pages[press.pageIndex]?.page.elements.find((e) => e.id === press.elementId);
+		if (el && el.type === "text") this.startTextEditing(press.pageIndex, el, false);
+		return true;
+	}
+
 	private cancelTransform(): void {
+		this.textToolPress = null;
+		if (this.plugin.settings.tool === "text") this.clearSelection();
 		this.transformSession = null;
 		this.transformBgCanvas = null;
 		this.scheduleActiveRedraw();
