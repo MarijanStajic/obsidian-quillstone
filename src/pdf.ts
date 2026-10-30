@@ -72,7 +72,7 @@ export async function renderPdfPageToCanvas(doc: PDFDocumentProxy, pageNumber: n
 	const page = await doc.getPage(pageNumber);
 	const viewport = page.getViewport({ scale: RASTER_DPI / 72 });
 
-	const canvas = document.createElement("canvas");
+	const canvas = createEl("canvas");
 	canvas.width = Math.max(1, Math.round(viewport.width));
 	canvas.height = Math.max(1, Math.round(viewport.height));
 	const ctx = canvas.getContext("2d");
@@ -113,7 +113,10 @@ function sanitizeLinkUrl(raw: unknown): string | undefined {
  */
 function destinationTop(explicit: unknown[]): number | null {
 	const name = (explicit[1] as { name?: string } | undefined)?.name;
-	const at = (index: number): number | null => (typeof explicit[index] === "number" ? (explicit[index] as number) : null);
+	const at = (index: number): number | null => {
+		const value = explicit[index];
+		return typeof value === "number" ? value : null;
+	};
 	switch (name) {
 		case "XYZ":
 			return at(3);
@@ -179,7 +182,8 @@ async function resolveDestination(
 	// lien lui-même.
 	const page = await doc.getPage(pageNumber);
 	const viewport = page.getViewport({ scale: 1 });
-	const [, y] = viewport.convertToViewportPoint(0, top);
+	// pdf.js type ces conversions en `any[]` : typées ici une fois pour toutes.
+	const [, y] = viewport.convertToViewportPoint(0, top) as number[];
 	return { pageNumber, targetY: round5(Math.min(1, Math.max(0, y / viewport.height))) };
 }
 
@@ -223,7 +227,7 @@ export async function getPdfPageLinks(doc: PDFDocumentProxy, pageNumber: number)
 		// « page suivante »...), volontairement ignoré plutôt que deviné.
 		if (!url && !target) continue;
 
-		const [vx1, vy1, vx2, vy2] = viewport.convertToViewportRectangle(a.rect as number[]);
+		const [vx1, vy1, vx2, vy2] = viewport.convertToViewportRectangle(a.rect as number[]) as number[];
 		const width = Math.abs(vx2 - vx1) / viewport.width;
 		const height = Math.abs(vy2 - vy1) / viewport.height;
 		if (!(width > 0) || !(height > 0)) continue; // rectangle vide (ou dimensions non numériques) : rien à cliquer

@@ -1,6 +1,5 @@
 import {
 	Editor,
-	Hotkey,
 	MarkdownFileInfo,
 	MarkdownPostProcessorContext,
 	MarkdownView,
@@ -164,18 +163,11 @@ export default class QuillStonePlugin extends Plugin {
 		// la palette de commandes et à un raccourci choisi par l'utilisateur.
 		this.addDrawViewCommand("toggle-toolbar", "Show/hide the toolbar", (view) => view.toggleToolbar());
 
-		this.addDrawViewCommand(
-			"bring-selection-to-front",
-			"Bring selection to front",
-			(view) => view.bringSelectionToFront(),
-			{ modifiers: ["Mod", "Shift"], key: "]" }
-		);
-		this.addDrawViewCommand(
-			"send-selection-to-back",
-			"Send selection to back",
-			(view) => view.sendSelectionToBack(),
-			{ modifiers: ["Mod", "Shift"], key: "[" }
-		);
+		// Sans raccourci par défaut (pour ne jamais entrer en conflit avec ceux
+		// de l'utilisateur) : Mod+Maj+] / Mod+Maj+[ restent actifs dans une
+		// feuille, gérés par la vue elle-même (voir DrawView.onWindowKeyDown).
+		this.addDrawViewCommand("bring-selection-to-front", "Bring selection to front", (view) => view.bringSelectionToFront());
+		this.addDrawViewCommand("send-selection-to-back", "Send selection to back", (view) => view.sendSelectionToBack());
 
 		// 5. Aperçu intégré ![[feuille.draw]] : Obsidian crée un élément
 		//    d'intégration pour cette syntaxe dans les deux modes (Lecture et
@@ -231,13 +223,11 @@ export default class QuillStonePlugin extends Plugin {
 	private addDrawViewCommand(
 		id: string,
 		name: string,
-		run: (view: DrawView) => void,
-		hotkey?: Hotkey
+		run: (view: DrawView) => void
 	): void {
 		this.addCommand({
 			id,
 			name,
-			hotkeys: hotkey ? [hotkey] : undefined,
 			checkCallback: (checking) => {
 				const view = this.app.workspace.getActiveViewOfType(DrawView);
 				// isTypingInField() : ces commandes n'ont plus de Scope à elles pour
@@ -254,8 +244,8 @@ export default class QuillStonePlugin extends Plugin {
 	}
 
 	/** Une commande qui bascule la DrawView active sur `tool` — voir addDrawViewCommand, dont elle n'est qu'un raccourci d'écriture pour le cas le plus courant. */
-	private addToolCommand(id: string, name: string, tool: ActiveTool, hotkey?: Hotkey): void {
-		this.addDrawViewCommand(id, name, (view) => view.setTool(tool), hotkey);
+	private addToolCommand(id: string, name: string, tool: ActiveTool): void {
+		this.addDrawViewCommand(id, name, (view) => view.setTool(tool));
 	}
 
 	/**

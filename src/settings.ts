@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, PluginSettingTab, SettingDefinition, SettingDefinitionItem } from "obsidian";
 import type QuillStonePlugin from "./main";
 import { BackgroundKind, Density, Orientation, PaperFormat, ShapeKind, TextAlign, TextFont } from "./model";
 import { openColorPicker } from "./colorPicker";
@@ -298,186 +298,153 @@ export function mergeSettings(loaded: unknown): QuillStoneSettings {
 	return settings;
 }
 
+/** Réglages dont un changement doit redessiner les feuilles ouvertes (voir QuillStoneSettingTab.setControlValue). */
+const REDRAW_SETTING_KEYS = new Set<string>(["highlighterAlwaysBehind", "paperAlwaysLight"]);
+
+function optionsOf<T extends string>(values: readonly T[], labels: Record<T, string>): Record<string, string> {
+	const options: Record<string, string> = {};
+	for (const value of values) options[value] = labels[value];
+	return options;
+}
+
 export class QuillStoneSettingTab extends PluginSettingTab {
 	constructor(app: App, private plugin: QuillStonePlugin) {
 		super(app, plugin);
 	}
 
-	display(): void {
-		const { containerEl } = this;
-		containerEl.empty();
+	/**
+	 * Réglages déclaratifs (Obsidian 1.13+) : rendus par Obsidian lui-même et
+	 * indexés dans la recherche des réglages. Lus et écrits via
+	 * getControlValue/setControlValue ci-dessous ; seules les palettes de
+	 * couleurs (pastilles cliquables, sélecteur maison) passent par un rendu
+	 * impératif (`render`).
+	 */
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		return [
+			{
+				name: "Default tool on open",
+				desc: "The tool active as soon as a sheet opens, regardless of the last tool used. The cursor suits someone mostly rearranging existing diagrams rather than writing.",
+				control: { type: "dropdown", key: "defaultTool", options: optionsOf(DEFAULT_TOOL_OPTIONS, DEFAULT_TOOL_LABELS) },
+			},
+			{
+				name: "Highlighter always in the background",
+				desc: "Highlighter strokes are rendered before pen strokes, regardless of their creation order. Disabled, the order is chronological: a highlighter stroke drawn after a pen stroke appears on top, translucent.",
+				control: { type: "toggle", key: "highlighterAlwaysBehind" },
+			},
+			{
+				name: "Paper always light",
+				desc: "Keeps the paper light even in dark theme, for reliable highlighting (the highlighter darkens without washing out the ink underneath). Disabled, the paper follows the theme and the highlighter automatically chooses between darkening and lightening based on its luminance.",
+				control: { type: "toggle", key: "paperAlwaysLight" },
+			},
+			{
+				name: "Default background",
+				desc: "Background applied to new sheets created from Obsidian.",
+				control: { type: "dropdown", key: "defaultBackground", options: optionsOf(BACKGROUND_KINDS, BACKGROUND_LABELS) },
+			},
+			{
+				name: "Default density",
+				desc: "Grid spacing for the grid, lines and dots backgrounds of new sheets. No effect on the other backgrounds, whose proportions are fixed.",
+				control: { type: "dropdown", key: "defaultDensity", options: optionsOf(DENSITIES, DENSITY_LABELS) },
+			},
+			{
+				name: "New page background",
+				desc: "Background applied to a new page added with the + button inside a sheet that's already open — distinct from the default background above, which only applies to the very first page of a newly created sheet.",
+				control: { type: "dropdown", key: "newPageBackground", options: optionsOf(BACKGROUND_KINDS, BACKGROUND_LABELS) },
+			},
+			{
+				name: "New page orientation",
+				desc: "Orientation of a new page added with the + button inside a sheet that's already open.",
+				control: { type: "dropdown", key: "newPageOrientation", options: { portrait: "Portrait", landscape: "Landscape" } },
+			},
+			{
+				name: "Straighten on hold",
+				desc: "A pen or highlighter stroke held still converts into a straight segment. Holding Shift from the start of the stroke always produces an immediate straight line, regardless of this setting — disabling it only prevents the automatic conversion, which can get in the way for slow writers.",
+				control: { type: "toggle", key: "straightenOnHold" },
+			},
+			{
+				name: "Delay before conversion",
+				desc: "How long a stroke must stay still, in milliseconds, before it converts into a straight line.",
+				control: {
+					type: "slider",
+					key: "straightenHoldDelayMs",
+					min: 300,
+					max: 1500,
+					step: 50,
+					disabled: () => !this.plugin.settings.straightenOnHold,
+				},
+			},
+			{
+				name: "Switch to selection after drawing a shape",
+				desc: "After drawing a shape from the palette, switch to the cursor tool with it already selected, ready to reposition or resize. Disable this to go straight back to the pen instead. A held pen or highlighter stroke recognized as a shape always stays on the tool that drew it.",
+				control: { type: "toggle", key: "autoSelectShapeAfterCreate" },
+			},
+			{
+				type: "group",
+				heading: "Colors",
+				items: COLORABLE_TOOLS.flatMap((tool): SettingDefinition[] => {
+					const label = COLORABLE_TOOL_LABELS[tool];
+					let swatchesEl: HTMLElement | null = null;
+					return [
+						{
+							name: `Palette — ${label}`,
+							desc: "Click a swatch to replace it.",
+							render: (setting) => {
+								setting.setName(`Palette — ${label}`).setDesc("Click a swatch to replace it.");
+								swatchesEl = setting.controlEl.createDiv({ cls: "quillstone-settings-swatches" });
+								this.renderPaletteEditor(swatchesEl, tool);
+							},
+						},
+						{
+							name: `Reset the ${label.toLowerCase()} palette`,
+							desc: "Restore this palette's default colors (recently used colors are unaffected).",
+							render: (setting) => {
+								setting
+									.setName(`Reset the ${label.toLowerCase()} palette`)
+									.setDesc("Restore this palette's default colors (recently used colors are unaffected).")
+									.addButton((button) =>
+										button.setButtonText("Reset").onClick(async () => {
+											await this.resetPalette(tool);
+											if (swatchesEl) {
+												swatchesEl.empty();
+												this.renderPaletteEditor(swatchesEl, tool);
+											}
+										})
+									);
+							},
+						},
+					];
+				}),
+			},
+		];
+	}
 
-		new Setting(containerEl)
-			.setName("Default tool on open")
-			.setDesc(
-				"The tool active as soon as a sheet opens, regardless of the last tool used. The cursor suits someone mostly rearranging existing diagrams rather than writing."
-			)
-			.addDropdown((dropdown) => {
-				for (const tool of DEFAULT_TOOL_OPTIONS) dropdown.addOption(tool, DEFAULT_TOOL_LABELS[tool]);
-				dropdown.setValue(this.plugin.settings.defaultTool);
-				dropdown.onChange(async (value) => {
-					this.plugin.settings.defaultTool = value as DefaultTool;
-					await this.plugin.saveSettings();
-				});
-			});
+	getControlValue(key: string): unknown {
+		return (this.plugin.settings as unknown as Record<string, unknown>)[key];
+	}
 
-		new Setting(containerEl)
-			.setName("Highlighter always in the background")
-			.setDesc(
-				"Highlighter strokes are rendered before pen strokes, regardless of their creation order. Disabled, the order is chronological: a highlighter stroke drawn after a pen stroke appears on top, translucent."
-			)
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.highlighterAlwaysBehind).onChange(async (value) => {
-					this.plugin.settings.highlighterAlwaysBehind = value;
-					await this.plugin.saveSettings();
-					this.plugin.refreshOpenDrawViews();
-				})
-			);
+	async setControlValue(key: string, value: unknown): Promise<void> {
+		(this.plugin.settings as unknown as Record<string, unknown>)[key] = value;
+		await this.plugin.saveSettings();
+		if (REDRAW_SETTING_KEYS.has(key)) this.plugin.refreshOpenDrawViews();
+		// "Delay before conversion" dépend de "Straighten on hold" (voir son `disabled`).
+		this.refreshDomState();
+	}
 
-		new Setting(containerEl)
-			.setName("Paper always light")
-			.setDesc(
-				"Keeps the paper light even in dark theme, for reliable highlighting (the highlighter darkens without washing out the ink underneath). Disabled, the paper follows the theme and the highlighter automatically chooses between darkening and lightening based on its luminance."
-			)
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.paperAlwaysLight).onChange(async (value) => {
-					this.plugin.settings.paperAlwaysLight = value;
-					await this.plugin.saveSettings();
-					this.plugin.refreshOpenDrawViews();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName("Default background")
-			.setDesc("Background applied to new sheets created from Obsidian.")
-			.addDropdown((dropdown) => {
-				for (const kind of BACKGROUND_KINDS) dropdown.addOption(kind, BACKGROUND_LABELS[kind]);
-				dropdown.setValue(this.plugin.settings.defaultBackground);
-				dropdown.onChange(async (value) => {
-					this.plugin.settings.defaultBackground = value as BackgroundKind;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new Setting(containerEl)
-			.setName("Default density")
-			.setDesc(
-				"Grid spacing for the grid/lines/dots backgrounds of new sheets (no effect on Seyès, staff, or isometric, whose proportions are fixed)."
-			)
-			.addDropdown((dropdown) => {
-				for (const density of DENSITIES) dropdown.addOption(density, DENSITY_LABELS[density]);
-				dropdown.setValue(this.plugin.settings.defaultDensity);
-				dropdown.onChange(async (value) => {
-					this.plugin.settings.defaultDensity = value as Density;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new Setting(containerEl)
-			.setName("New page background")
-			.setDesc(
-				"Background applied to a new page added with the + button inside a sheet that's already open — distinct from the default background above, which only applies to the very first page of a newly created sheet."
-			)
-			.addDropdown((dropdown) => {
-				for (const kind of BACKGROUND_KINDS) dropdown.addOption(kind, BACKGROUND_LABELS[kind]);
-				dropdown.setValue(this.plugin.settings.newPageBackground);
-				dropdown.onChange(async (value) => {
-					this.plugin.settings.newPageBackground = value as BackgroundKind;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new Setting(containerEl)
-			.setName("New page orientation")
-			.setDesc("Orientation of a new page added with the + button inside a sheet that's already open.")
-			.addDropdown((dropdown) => {
-				dropdown.addOption("portrait", "Portrait");
-				dropdown.addOption("landscape", "Landscape");
-				dropdown.setValue(this.plugin.settings.newPageOrientation);
-				dropdown.onChange(async (value) => {
-					this.plugin.settings.newPageOrientation = value as Orientation;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new Setting(containerEl)
-			.setName("Straighten on hold")
-			.setDesc(
-				"A pen or highlighter stroke held still converts into a straight segment. Holding Shift from the start of the stroke always produces an immediate straight line, regardless of this setting — disabling it only prevents the automatic conversion, which can get in the way for slow writers."
-			)
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.straightenOnHold).onChange(async (value) => {
-					this.plugin.settings.straightenOnHold = value;
-					await this.plugin.saveSettings();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName("Delay before conversion")
-			.setDesc("How long a stroke must stay still, in milliseconds, before it converts into a straight line.")
-			.addSlider((slider) =>
-				slider
-					.setLimits(300, 1500, 50)
-					.setValue(this.plugin.settings.straightenHoldDelayMs)
-					.onChange(async (value) => {
-						this.plugin.settings.straightenHoldDelayMs = value;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Switch to selection after drawing a shape")
-			.setDesc(
-				"After drawing a shape from the palette, switch to the cursor tool with it already selected, ready to reposition or resize. Disable this to go straight back to the pen instead. A held pen/highlighter stroke recognized as a shape (circle, rectangle, star, zigzag...) always stays on the pen/highlighter that drew it."
-			)
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.autoSelectShapeAfterCreate).onChange(async (value) => {
-					this.plugin.settings.autoSelectShapeAfterCreate = value;
-					await this.plugin.saveSettings();
-				})
-			);
-
-		this.displayColorSection(containerEl);
+	private async resetPalette(tool: ColorableTool): Promise<void> {
+		const defaults = tool === "pen" ? DEFAULT_PEN_PALETTE : DEFAULT_HIGHLIGHTER_PALETTE;
+		this.plugin.settings.colors[tool].palette = [...defaults];
+		await this.plugin.saveSettings();
+		this.plugin.refreshOpenDrawViews();
 	}
 
 	/**
-	 * Une palette par outil, éditable directement : cliquer une pastille
+	 * Pastilles d'une palette, éditables directement : cliquer une pastille
 	 * ouvre le sélecteur maison (voir colorPicker.ts — le même composant que
 	 * la barre d'outils, pas un `<input type="color">` natif) et remplace
 	 * cette teinte, avec un aperçu immédiat. Chaque bordure de pastille (voir
 	 * styles.css) reste visible quelle que soit la couleur choisie, y compris
-	 * blanc sur fond clair — l'aperçu de la teinte ne doit jamais se fondre
-	 * dans son entourage.
+	 * blanc sur fond clair.
 	 */
-	private displayColorSection(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName("Colors").setHeading();
-
-		for (const tool of COLORABLE_TOOLS) {
-			const label = COLORABLE_TOOL_LABELS[tool];
-
-			new Setting(containerEl)
-				.setName(`Palette — ${label}`)
-				.setDesc("Click a swatch to replace it.");
-
-			const swatchesEl = containerEl.createDiv({ cls: "quillstone-settings-swatches" });
-			this.renderPaletteEditor(swatchesEl, tool);
-
-			new Setting(containerEl)
-				.setName(`Reset the ${label.toLowerCase()} palette`)
-				.setDesc("Restore this palette's default colors (recently used colors are unaffected).")
-				.addButton((button) =>
-					button.setButtonText("Reset").onClick(async () => {
-						const defaults = tool === "pen" ? DEFAULT_PEN_PALETTE : DEFAULT_HIGHLIGHTER_PALETTE;
-						this.plugin.settings.colors[tool].palette = [...defaults];
-						await this.plugin.saveSettings();
-						this.plugin.refreshOpenDrawViews();
-						swatchesEl.empty();
-						this.renderPaletteEditor(swatchesEl, tool);
-					})
-				);
-		}
-	}
-
 	private renderPaletteEditor(container: HTMLElement, tool: ColorableTool): void {
 		const palette = this.plugin.settings.colors[tool].palette;
 		palette.forEach((color, index) => {

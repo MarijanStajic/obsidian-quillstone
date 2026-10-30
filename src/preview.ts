@@ -230,7 +230,7 @@ export class DrawPreviewManager {
 
 		const scale = width / page.width;
 		const dpr = window.devicePixelRatio || 1;
-		const canvas = document.createElement("canvas");
+		const canvas = createEl("canvas");
 		canvas.width = Math.max(1, Math.round(width * dpr));
 		canvas.height = Math.max(1, Math.round(page.height * scale * dpr));
 

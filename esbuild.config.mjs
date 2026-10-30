@@ -15,6 +15,70 @@ const prod = process.argv[2] === "production";
 // (voir virtualPdfWorkerSourcePlugin ci-dessous) — src/pdf.ts le charge au
 // runtime via un Blob URL (voir configurePdfWorker), sans jamais dépendre
 // d'un second fichier sur disque.
+/**
+ * Aucune génération de code à l'exécution dans main.js (voir aussi le
+ * polyfill core-js plus bas). pdf.js contient deux usages de `new Function` : un test de détection
+ * (`isEvalSupported`, dans le script principal ET dans le Worker) et un
+ * compilateur de fonctions PostScript (Worker seulement) qui transforme du
+ * contenu de PDF en code exécutable. L'analyse statique d'Obsidian signale
+ * à raison toute exécution de code généré. On les neutralise à la source,
+ * avant le bundling : le test renvoie toujours "non supporté", et le
+ * compilateur n'est plus jamais appelé — pdf.js retombe alors sur son
+ * interpréteur PostScript, déjà utilisé partout où eval est interdit (CSP),
+ * avec exactement le même rendu. Même garde-fou que pour jsPDF ci-dessous :
+ * un nombre d'occurrences inattendu fait échouer le build plutôt que de
+ * laisser passer du code dynamique en silence.
+ */
+const DYNAMIC_CODE_PATCHES = [
+  {
+    file: /pdfjs-dist[\\/]build[\\/]pdf\.mjs$/,
+    replacements: [{ from: 'new Function("");', to: 'throw new Error("eval is disabled in this build.");', count: 1 }],
+  },
+  {
+    file: /pdfjs-dist[\\/]build[\\/]pdf\.worker\.mjs$/,
+    replacements: [
+      { from: 'new Function("");', to: 'throw new Error("eval is disabled in this build.");', count: 1 },
+      {
+        from: 'return new Function("src", "srcOffset", "dest", "destOffset", compiled);',
+        to: "void compiled;",
+        count: 1,
+      },
+    ],
+  },
+  // Polyfill `globalThis` de core-js (embarqué via jsPDF) : son dernier
+  // repli, `Function('return this')()`, n'est jamais atteint (globalThis
+  // existe toujours dans Obsidian), mais reste de la génération de code aux
+  // yeux d'une analyse statique.
+  {
+    file: /core-js[\\/]internals[\\/]global-this\.js$/,
+    replacements: [{ from: "Function('return this')()", to: "globalThis", count: 1 }],
+  },
+];
+
+const patchDynamicCodePlugin = {
+  name: "patch-dynamic-code",
+  setup(build) {
+    for (const { file, replacements } of DYNAMIC_CODE_PATCHES) {
+      build.onLoad({ filter: file }, async (args) => {
+        let contents = await readFile(args.path, "utf8");
+        for (const { from, to, count } of replacements) {
+          const found = contents.split(from).length - 1;
+          if (found !== count) {
+            throw new Error(
+              `patch-dynamic-code: expected ${count} occurrence(s) of ${from} in ${args.path}, found ${found} — pdf.js internals likely changed, review before rebuilding.`
+            );
+          }
+          contents = contents.split(from).join(to);
+        }
+        if (/\bFunction\(/.test(contents)) {
+          throw new Error(`patch-dynamic-code: unexpected "Function(" left in ${args.path}.`);
+        }
+        return { contents, loader: "js" };
+      });
+    }
+  },
+};
+
 const workerResult = await esbuild.build({
   entryPoints: ["node_modules/pdfjs-dist/build/pdf.worker.mjs"],
   bundle: true,
@@ -25,6 +89,7 @@ const workerResult = await esbuild.build({
   sourcemap: false,
   write: false,
   minify: prod,
+  plugins: [patchDynamicCodePlugin],
 });
 const pdfWorkerSource = workerResult.outputFiles[0].text;
 
@@ -81,7 +146,7 @@ const patchJsPdfScriptInjectionPlugin = {
 const context = await esbuild.context({
   entryPoints: ["src/main.ts"],
   bundle: true,
-  plugins: [virtualPdfWorkerSourcePlugin, patchJsPdfScriptInjectionPlugin],
+  plugins: [virtualPdfWorkerSourcePlugin, patchJsPdfScriptInjectionPlugin, patchDynamicCodePlugin],
   external: [
     "obsidian",
     "electron",

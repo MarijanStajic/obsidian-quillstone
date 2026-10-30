@@ -107,10 +107,6 @@
 	white-space: pre-wrap;
 	word-break: break-word;
 	z-index: 3;
-	/* Jamais de fond, même au survol/focus : les thèmes d'Obsidian en posent
-	   un sur tout <textarea>:hover, qui rendait la zone toute noire. */
-	background-color: transparent !important;
-	box-shadow: none !important;
 	/* Texte transparent, seul le curseur reste visible (caret-color, posé en
 	   inline par view.ts) : c'est .quillstone-text-mirror, juste dessous, qui
 	   affiche chaque caractère dans sa propre couleur. */
@@ -118,9 +114,17 @@
 	-webkit-text-fill-color: transparent;
 }
 
-.quillstone-text-editor:hover,
-.quillstone-text-editor:focus {
-	background-color: transparent !important;
+/* Jamais de fond ni d'ombre, même au survol/focus : Obsidian et les thèmes
+   en posent sur tout <textarea> (textarea:hover, textarea:focus…), ce qui
+   rendait la zone toute noire. Sélecteur plus spécifique que les leurs
+   plutôt qu'une priorité forcée. */
+.quillstone-wrapper textarea.quillstone-text-editor,
+.quillstone-wrapper textarea.quillstone-text-editor:hover,
+.quillstone-wrapper textarea.quillstone-text-editor:focus,
+.quillstone-wrapper textarea.quillstone-text-editor:focus-visible,
+.quillstone-wrapper textarea.quillstone-text-editor:active {
+	background-color: transparent;
+	box-shadow: none;
 }
 
 .quillstone-text-editor::selection {

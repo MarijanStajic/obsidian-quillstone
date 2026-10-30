@@ -22,15 +22,13 @@ export class ConfirmModal extends Modal {
 		contentEl.createEl("p", { text: this.message });
 
 		new Setting(contentEl)
-			.addButton((btn) =>
-				btn
-					.setButtonText(this.confirmLabel)
-					.setWarning()
-					.onClick(() => {
-						this.close();
-						this.onConfirm();
-					})
-			)
+			.addButton((btn) => {
+				btn.setButtonText(this.confirmLabel).onClick(() => {
+					this.close();
+					this.onConfirm();
+				});
+				btn.setDestructive();
+			})
 			.addButton((btn) => btn.setButtonText("Cancel").onClick(() => this.close()));
 	}
 

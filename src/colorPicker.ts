@@ -143,7 +143,7 @@ export function openColorPicker(options: ColorPickerOptions): void {
 	let squareX = initialHsv.s * SQUARE_SIZE;
 	let squareY = (1 - initialHsv.v) * SQUARE_SIZE;
 
-	const panel = document.createElement("div");
+	const panel = createDiv();
 	panel.className = "quillstone-picker-panel";
 	panel.setAttribute("role", "dialog");
 	panel.setAttribute("aria-label", "Color picker");

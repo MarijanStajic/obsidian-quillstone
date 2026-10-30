@@ -9,6 +9,7 @@ import {
 	WorkspaceLeaf,
 	setIcon,
 	setTooltip,
+	Keymap,
 } from "obsidian";
 import type QuillStonePlugin from "./main";
 import {
@@ -1440,7 +1441,7 @@ export class DrawView extends TextFileView {
 	// --- Pages du document ---------------------------------------------------------
 
 	private createPageRuntime(page: DrawingPage): PageRuntime {
-		const cacheCanvas = document.createElement("canvas");
+		const cacheCanvas = createEl("canvas");
 		const cacheCtx = cacheCanvas.getContext("2d");
 		if (!cacheCtx) throw new Error("Canvas 2D indisponible");
 		return {
@@ -1669,7 +1670,7 @@ export class DrawView extends TextFileView {
 				const imageElements = page.elements.filter((el): el is ImageElement => el.type === "image");
 				await Promise.all(imageElements.map((el) => this.imageCache.waitFor(el, this.doc.pdfSources)));
 
-				const canvas = document.createElement("canvas");
+				const canvas = createEl("canvas");
 				canvas.width = Math.max(1, Math.round(page.width * PDF_EXPORT_SCALE));
 				canvas.height = Math.max(1, Math.round(page.height * PDF_EXPORT_SCALE));
 				const ctx = canvas.getContext("2d");
@@ -3420,6 +3421,22 @@ export class DrawView extends TextFileView {
 		// déclencheur du panoramique (voir isPanTrigger) qui l'utilise partout
 		// ailleurs dans la vue.
 		if (this.isTypingInField()) return;
+		// Mod+Maj+] / Mod+Maj+[ : premier/arrière-plan de la sélection. Gérés
+		// ici plutôt qu'en raccourci par défaut des commandes Obsidian (qui
+		// risquerait d'entrer en conflit avec ceux de l'utilisateur, voir
+		// main.ts) — `code` plutôt que `key` : avec Maj, `key` vaut "}"/"{"
+		// sur un clavier QWERTY et tout autre caractère ailleurs.
+		if (
+			(event.code === "BracketRight" || event.code === "BracketLeft") &&
+			Keymap.isModifier(event, "Mod") &&
+			event.shiftKey &&
+			this.app.workspace.getActiveViewOfType(DrawView) === this
+		) {
+			event.preventDefault();
+			if (event.code === "BracketRight") this.bringSelectionToFront();
+			else this.sendSelectionToBack();
+			return;
+		}
 		if (event.code !== "Space" || event.repeat) return;
 		if (this.app.workspace.getActiveViewOfType(DrawView) !== this) return;
 		event.preventDefault();
@@ -3718,7 +3735,7 @@ export class DrawView extends TextFileView {
 
 	/** Ancre invisible positionnée au point de clic : openColorPicker a besoin d'un HTMLElement à ancrer, qu'un clic de menu contextuel ne fournit pas naturellement. */
 	private openSelectionColorPicker(x: number, y: number): void {
-		const anchor = document.createElement("div");
+		const anchor = createDiv();
 		anchor.setCssStyles({
 			position: "fixed",
 			left: `${x}px`,
@@ -8634,7 +8651,7 @@ export class DrawView extends TextFileView {
 		const imageElements = page.elements.filter((el): el is ImageElement => el.type === "image");
 		await Promise.all(imageElements.map((el) => this.imageCache.waitFor(el, this.doc.pdfSources)));
 
-		const canvas = document.createElement("canvas");
+		const canvas = createEl("canvas");
 		canvas.width = Math.max(1, Math.round(width * CAPTURE_SCALE));
 		canvas.height = Math.max(1, Math.round(height * CAPTURE_SCALE));
 		const ctx = canvas.getContext("2d");
@@ -8698,7 +8715,7 @@ export class DrawView extends TextFileView {
 		if (!session) return;
 		const rt = this.pages[session.pageIndex];
 		if (!rt.cacheCanvas.width || !rt.cacheCanvas.height) return;
-		const buffer = document.createElement("canvas");
+		const buffer = createEl("canvas");
 		buffer.width = rt.cacheCanvas.width;
 		buffer.height = rt.cacheCanvas.height;
 		const ctx = buffer.getContext("2d");
@@ -9376,7 +9393,7 @@ export class DrawView extends TextFileView {
 		}
 		if (!bounds) return null;
 
-		const canvas = document.createElement("canvas");
+		const canvas = createEl("canvas");
 		canvas.width = Math.max(1, Math.round(bounds.maxX - bounds.minX));
 		canvas.height = Math.max(1, Math.round(bounds.maxY - bounds.minY));
 		const ctx = canvas.getContext("2d");
@@ -9563,7 +9580,7 @@ export class DrawView extends TextFileView {
 
 	/** « Insérer une image » : sélecteur de fichier natif, restreint aux formats acceptés. */
 	private openImagePicker(): void {
-		const input = document.createElement("input");
+		const input = createEl("input");
 		input.type = "file";
 		input.accept = "image/png,image/jpeg,image/webp,image/gif";
 		input.addEventListener("change", () => {

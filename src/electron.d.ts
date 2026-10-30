@@ -9,7 +9,7 @@
 declare module "electron" {
 	interface NativeImage {
 		isEmpty(): boolean;
-		toPNG(): Buffer;
+		toPNG(): Uint8Array;
 	}
 
 	export const nativeImage: {

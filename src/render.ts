@@ -152,7 +152,7 @@ function cachedBackground(
 ): HTMLCanvasElement {
 	const key = `${kind}|${width}|${height}|${paper}|${ink}|${density}`;
 	if (!backgroundCache || backgroundCache.key !== key) {
-		const canvas = document.createElement("canvas");
+		const canvas = createEl("canvas");
 		canvas.width = width;
 		canvas.height = height;
 		const cctx = canvas.getContext("2d");
@@ -379,7 +379,7 @@ let colorProbe: HTMLCanvasElement | null = null;
  * l'utilisateur.
  */
 function resolveToRGB(color: string): [number, number, number] {
-	if (!colorProbe) colorProbe = document.createElement("canvas");
+	if (!colorProbe) colorProbe = createEl("canvas");
 	if (colorProbe.width !== 1 || colorProbe.height !== 1) {
 		colorProbe.width = 1;
 		colorProbe.height = 1;
@@ -401,7 +401,7 @@ function isLightPaper(paperColor: string): boolean {
 }
 
 function ensureHighlighterBuffer(width: number, height: number): HTMLCanvasElement {
-	if (!highlighterBuffer) highlighterBuffer = document.createElement("canvas");
+	if (!highlighterBuffer) highlighterBuffer = createEl("canvas");
 	if (highlighterBuffer.width !== width || highlighterBuffer.height !== height) {
 		highlighterBuffer.width = width;
 		highlighterBuffer.height = height;
@@ -838,7 +838,7 @@ function textFont(fontSizePx: number, font: TextFont): string {
 let textMeasureCanvas: HTMLCanvasElement | null = null;
 
 function textMeasureCtx(): CanvasRenderingContext2D | null {
-	if (!textMeasureCanvas) textMeasureCanvas = document.createElement("canvas");
+	if (!textMeasureCanvas) textMeasureCanvas = createEl("canvas");
 	return textMeasureCanvas.getContext("2d");
 }
 
