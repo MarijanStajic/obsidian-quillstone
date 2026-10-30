@@ -252,6 +252,15 @@ export interface ShapeElement {
 	 * équivaut à `false`, comme pour Stroke.dashed.
 	 */
 	dashed?: boolean;
+	/**
+	 * Forme issue d'un trait de SURLIGNEUR (reconnue après un maintien, ou
+	 * ligne droite à plusieurs segments — voir
+	 * view.ts:triggerHoldConversion/buildStraightPolylineShape) : rendue
+	 * translucide exactement comme le surligneur (voir
+	 * render.ts:drawShapeElement), jamais en contour opaque. Absent
+	 * équivaut à `false`.
+	 */
+	highlighter?: boolean;
 }
 
 /** Alignement horizontal du texte à l'intérieur de sa boîte — voir TextElement.align, render.ts:drawTextElement. "justify" étire chaque ligne pour remplir toute la largeur en espaçant ses mots, SAUF la dernière ligne d'un paragraphe (retour à la ligne saisi par l'utilisateur, ou toute dernière ligne du texte) — comme dans n'importe quel traitement de texte, jamais la dernière ligne d'un bloc justifié. */
@@ -338,8 +347,24 @@ export interface TextElement {
 	align?: TextAlign;
 	/** Absent équivaut à "sans" (voir render.ts:TEXT_FONT_STACKS) — même raison que `align` ci-dessus : un .draw écrit par une version antérieure du plugin, sans ce champ, doit continuer à s'afficher exactement comme avant son ajout. */
 	font?: TextFont;
+	/**
+	 * Couleurs par plage de caractères (offsets UTF-16 dans `text`, `end`
+	 * exclu), pour plusieurs couleurs dans une même zone — voir
+	 * render.ts:textColorSegments. Tout caractère hors plage prend `color`.
+	 * Absent (le cas d'une zone d'une seule couleur, et de tout .draw écrit
+	 * avant cette fonctionnalité) : tout le texte est en `color`. Jamais
+	 * muté en place, toujours remplacé en entier (voir view.ts:cloneElement).
+	 */
+	colorRuns?: TextColorRun[];
 	/** Verrouillé par l'outil sélection — même comportement que StrokeElement.locked/ImageElement.locked. */
 	locked?: boolean;
+}
+
+/** Une plage colorée d'une zone de texte — voir TextElement.colorRuns. */
+export interface TextColorRun {
+	start: number;
+	end: number;
+	color: string;
 }
 
 /** Tout ce qu'une page peut contenir, dans l'ordre chronologique de création — voir DrawingPage.elements. */

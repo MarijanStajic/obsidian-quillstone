@@ -235,6 +235,8 @@ export interface QuillStoneSettings {
 	 * cette info qu'une nouvelle installation.
 	 */
 	hasShownScribbleNotice: boolean;
+	/** Barre d'outils repliée (voir DrawView.setToolbarHidden) — mémorisé pour toutes les feuilles, jusqu'à ce qu'on la rouvre. */
+	toolbarHidden: boolean;
 }
 
 export const DEFAULT_SETTINGS: QuillStoneSettings = {
@@ -264,6 +266,7 @@ export const DEFAULT_SETTINGS: QuillStoneSettings = {
 	straightenHoldDelayMs: 600,
 	autoSelectShapeAfterCreate: true,
 	hasShownScribbleNotice: false,
+	toolbarHidden: false,
 };
 
 function cloneDefaultSettings(): QuillStoneSettings {
@@ -425,7 +428,7 @@ export class QuillStoneSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Switch to selection after drawing a shape")
 			.setDesc(
-				"After drawing a shape from the palette, or after a held stroke is recognized as one (circle, rectangle, star, zigzag...), switch to the selection tool with it already selected, ready to reposition or resize. Disable this to go straight back to the pen instead (or stay on the pen/highlighter that drew it, for a recognized shape), so you can keep writing or tracing shapes back-to-back without the tool switching away each time."
+				"After drawing a shape from the palette, switch to the cursor tool with it already selected, ready to reposition or resize. Disable this to go straight back to the pen instead. A held pen/highlighter stroke recognized as a shape (circle, rectangle, star, zigzag...) always stays on the pen/highlighter that drew it."
 			)
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.autoSelectShapeAfterCreate).onChange(async (value) => {

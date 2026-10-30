@@ -107,6 +107,46 @@
 	white-space: pre-wrap;
 	word-break: break-word;
 	z-index: 3;
+	/* Jamais de fond, même au survol/focus : les thèmes d'Obsidian en posent
+	   un sur tout <textarea>:hover, qui rendait la zone toute noire. */
+	background-color: transparent !important;
+	box-shadow: none !important;
+	/* Texte transparent, seul le curseur reste visible (caret-color, posé en
+	   inline par view.ts) : c'est .quillstone-text-mirror, juste dessous, qui
+	   affiche chaque caractère dans sa propre couleur. */
+	color: transparent;
+	-webkit-text-fill-color: transparent;
+}
+
+.quillstone-text-editor:hover,
+.quillstone-text-editor:focus {
+	background-color: transparent !important;
+}
+
+.quillstone-text-editor::selection {
+	color: transparent;
+	-webkit-text-fill-color: transparent;
+	background-color: rgba(var(--interactive-accent-rgb, 72, 54, 153), 0.3);
+}
+
+/*
+ * Calque coloré sous le textarea d'édition (voir
+ * view.ts:TextEditorSession.mirror et syncTextMirror) — mêmes bordure,
+ * boîte et règles de retour à la ligne que .quillstone-text-editor, pour que
+ * chaque caractère tombe exactement sur celui du textarea. Posé par-dessus
+ * (z-index), mais jamais cliquable : clics et saisie vont au textarea.
+ */
+.quillstone-text-mirror {
+	position: absolute;
+	box-sizing: border-box;
+	border: 1px solid transparent;
+	overflow: hidden;
+	white-space: pre-wrap;
+	word-break: break-word;
+	pointer-events: none;
+	/* AU-DESSUS du textarea (qui reçoit quand même tous les clics, ce calque
+	   les laissant passer) : aucun fond de survol ne peut plus le masquer. */
+	z-index: 4;
 }
 
 /*
@@ -144,6 +184,34 @@
 	width: 10px;
 	height: 10px;
 	background: repeating-linear-gradient(-45deg, #ffffff 0, #ffffff 1.5px, transparent 1.5px, transparent 4px);
+}
+
+/*
+ * Poignée de taille du TEXTE (voir view.ts:TextEditorSession.fontHandle et
+ * onTextFontHandlePointerMove) — même gabarit que la poignée de
+ * redimensionnement, posée juste à sa droite ; un « A » la distingue.
+ */
+.quillstone-text-font-handle {
+	position: absolute;
+	width: 22px;
+	height: 22px;
+	transform: translate(-50%, -50%);
+	border-radius: 6px;
+	background-color: var(--interactive-accent);
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+	cursor: nwse-resize;
+	z-index: 4;
+	touch-action: none;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: #ffffff;
+	font: bold 13px/1 sans-serif;
+	user-select: none;
+}
+
+.quillstone-text-font-handle::before {
+	content: "A";
 }
 
 /*
@@ -305,6 +373,24 @@
 	padding: 6px 10px;
 	background-color: var(--background-primary);
 	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+/* Bouton « replier » : toujours poussé tout à droite de la barre. */
+.quillstone-toolbar-collapse-group {
+	margin-left: auto;
+	border-right: none;
+}
+
+/* Bouton flottant qui rouvre la barre d'outils repliée (voir view.ts:setToolbarHidden). */
+.quillstone-toolbar-reveal {
+	position: absolute;
+	top: 6px;
+	right: 10px;
+	z-index: 6;
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
 }
 
 .quillstone-toolbar-group {

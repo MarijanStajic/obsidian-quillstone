@@ -45,10 +45,12 @@ import {
 	RenderColors,
 	StrokeBounds,
 	boundsNearCircle,
+	compressTextColors,
 	computeElementBounds,
 	distanceToSegment,
 	drawElement,
 	eraseZone,
+	expandTextColors,
 	measureTextBoxSize,
 	measureTextHeight,
 	renderScene,
@@ -207,22 +209,16 @@ const PDF_EXPORT_SCALE = 2;
  * maintien ne se déclenchait presque jamais).
  */
 const STRAIGHTEN_STILL_THRESHOLD_PX = 3;
-const ANGLE_SNAP_STEP_DEG = 15;
 /**
- * Distance angulaire en deçà de laquelle l'aimantation s'active
- * spontanément, SANS Maj — voir updateStraightLine. Fixée à la MOITIÉ du
- * pas (ANGLE_SNAP_STEP_DEG / 2) : comme aucun angle brut ne peut jamais être
- * à plus de 7,5° du multiple de 15° le plus proche, ça revient à aimanter
- * TOUJOURS, par défaut, sauf Alt maintenue (voir shouldSnap) — jamais
- * seulement "quand on s'en approche". Volontaire : à l'usage, une valeur
- * plus stricte (4° à l'origine) laissait passer tel quel un angle à main
- * levée visé à 90° mais tracé à, par exemple, 80° — assez proche pour que
- * l'intention soit évidente, mais pas assez pour l'ancien seuil, ce qui
- * produisait un angle visiblement tordu au lieu du coin net attendu (voir
- * le bug signalé). Alt reste l'unique façon d'obtenir un angle brut,
- * volontairement oblique.
+ * Pas de l'aimantation angulaire d'une ligne droite — qui n'est PLUS
+ * permanente (voir le bug signalé : les traits droits ne suivaient que des
+ * angles de 15°, 30°...) : la ligne suit d'abord l'angle réel du geste, puis
+ * se fixe au multiple de ce pas le plus proche seulement si le stylet reste
+ * encore immobile un moment une fois la ligne redressée (voir
+ * StraightLineState.angleLocked, lockStraightLineAngle). Maj l'impose
+ * d'emblée, Alt l'interdit.
  */
-const ANGLE_SNAP_TOLERANCE_DEG = ANGLE_SNAP_STEP_DEG / 2;
+const ANGLE_SNAP_STEP_DEG = 15;
 /** Durée du bref halo qui signale une conversion déclenchée par maintien (jamais par Maj, geste déjà volontaire). */
 const STRAIGHTEN_FLASH_MS = 220;
 const STRAIGHTEN_HAPTIC_MS = 25;
@@ -316,7 +312,9 @@ const TOOLS: ActiveTool[] = [
 ];
 
 /** Largeur par défaut (repère de page) d'une zone de texte fraîchement posée par un clic — voir startTextCreation. Ajustable ensuite comme n'importe quel élément, via les poignées de l'outil sélection. */
-const TEXT_DEFAULT_WIDTH = 220;
+const TEXT_DEFAULT_WIDTH = 400;
+/** Taille de police d'une zone de texte posée par un simple clic, sans zone dessinée — voir finishTextBoxCreation (une zone dessinée, elle, tire sa taille de sa hauteur). */
+const TEXT_CLICK_FONT_SIZE_PX = 50;
 /**
  * En dessous (repère ÉCRAN/CSS, PAS repère de page — voir
  * STRAIGHTEN_STILL_THRESHOLD_PX pour la même remarque ailleurs dans ce
@@ -383,6 +381,15 @@ const TOOL_LABELS: Record<ActiveTool, string> = {
  * ("suppression totale d'un coup") : aucun des trois n'a de convention
  * établie ailleurs, contrairement à "h" (Main/Hand) ou "p"/"t"/"e"/"c".
  */
+/** Touche qui affiche/masque la barre d'outils (voir DrawView.toggleToolbar) — même mécanisme de Scope que TOOL_SHORTCUTS. */
+const TOOLBAR_TOGGLE_KEY = "b";
+
+/** Libellé d'un outil suivi de sa touche, s'il en a une (voir TOOL_SHORTCUTS) — « Pen (P) ». */
+function toolLabelWithShortcut(tool: ActiveTool): string {
+	const key = Object.keys(TOOL_SHORTCUTS).find((k) => TOOL_SHORTCUTS[k] === tool);
+	return key ? `${TOOL_LABELS[tool]} (${key.toUpperCase()})` : TOOL_LABELS[tool];
+}
+
 const TOOL_SHORTCUTS: Partial<Record<string, ActiveTool>> = {
 	p: "pen",
 	m: "highlighter",
@@ -915,6 +922,10 @@ interface StraightLineState {
 	pressureCount: number;
 	/** Angle affiché (aimanté ou non) pour le segment COURANT (depuis le dernier sommet verrouillé) ; `null` tant que l'extrémité n'a pas encore bougé de ce sommet (segment de longueur nulle, aucune direction). Remis à `null` par lockStraightLineVertex : le nouveau segment n'a pas encore de direction tant qu'il n'a pas lui-même bougé. */
 	snapAngleDeg: number | null;
+	/** Vrai une fois l'angle du segment COURANT fixé au multiple de ANGLE_SNAP_STEP_DEG le plus proche, par un maintien immobile après le redressement (voir lockStraightLineAngle) — remis à faux à chaque nouveau sommet (voir lockStraightLineVertex). Tant qu'il est faux, le segment suit l'angle réel du geste. */
+	angleLocked: boolean;
+	/** Dernière extrémité BRUTE reçue (repère de page, avant aimantation) — pour réappliquer l'aimantation sur place au moment où l'angle se fixe, sans attendre le prochain mouvement. */
+	lastRawEnd: [number, number];
 }
 
 /** Un geste (trait, gomme, lasso, transformation) commence toujours sur UNE page — voir hitPage — et y reste confiné jusqu'à sa fin, même si le pointeur dérive ensuite au-dessus d'une page voisine : chaque session ci-dessous fige donc son `pageIndex` dès sa création. */
@@ -1004,6 +1015,39 @@ interface TextEditorSession {
 	resizeHandle: HTMLDivElement;
 	/** Poignée de déplacement, au coin haut-gauche du textarea (voir onTextMoveHandlePointerDown) : déplacer la zone SANS quitter l'édition — le textarea lui-même réserve le glisser à la sélection de texte. */
 	moveHandle: HTMLDivElement;
+	/**
+	 * Poignée de TAILLE DU TEXTE, juste à droite de resizeHandle (voir
+	 * onTextFontHandlePointerDown) : l'étirer agrandit/réduit `fontSizePx` —
+	 * et la largeur de la boîte dans la même proportion, pour que le texte
+	 * grossisse sans se recouper autrement — là où resizeHandle, lui, ne
+	 * touche jamais la police.
+	 */
+	fontHandle: HTMLDivElement;
+	/**
+	 * Calque coloré sur le textarea (dont le texte est transparent, seul
+	 * son curseur reste visible — voir .quillstone-text-editor dans
+	 * styles.css) : un <textarea> ne sait afficher qu'une seule couleur, ce
+	 * calque affiche chaque caractère dans SA couleur (voir charColors),
+	 * avec exactement la même police/marge/largeur pour que le retour à la
+	 * ligne coïncide (voir syncTextMirror).
+	 */
+	mirror: HTMLDivElement;
+	/** Couleur de chaque caractère (UTF-16) de ta.value — tenue à jour à chaque frappe (voir onTextEditorInput), compressée en TextElement.colorRuns à la validation. */
+	charColors: string[];
+	/** ta.value au dernier "input" traité — sert à repérer quelle plage a changé (voir onTextEditorInput). */
+	prevText: string;
+	/** Couleur des caractères tapés ensuite — la dernière couleur choisie pendant cette édition (voir applyLiveTextColor). */
+	typingColor: string;
+}
+
+/** Glissement en cours sur fontHandle (voir TextEditorSession) — taille de police et dimensions de départ (repère de page) figées au pointerdown. */
+interface TextFontDrag {
+	pointerId: number;
+	startClientX: number;
+	startClientY: number;
+	startFontSizePx: number;
+	startWidth: number;
+	startHeight: number;
 }
 
 /**
@@ -1078,6 +1122,8 @@ export class DrawView extends TextFileView {
 	private documentHeight = 1;
 
 	private toolbarEl!: HTMLDivElement;
+	/** Bouton flottant qui rouvre la barre d'outils une fois repliée — voir setToolbarHidden. */
+	private toolbarRevealBtn!: HTMLDivElement;
 	private colorsGroupEl!: HTMLDivElement;
 	private zoomLabelEl!: HTMLDivElement;
 	/** « Page X / N », cliquable pour choisir directement une page (voir promptGoToPage) — tenu à jour à chaque redessin du volet, voir redrawViewport. */
@@ -1195,6 +1241,8 @@ export class DrawView extends TextFileView {
 	private textResizeDrag: TextResizeDrag | null = null;
 	/** Glissement en cours sur la poignée de déplacement du textarea d'édition (voir TextMoveDrag) — `null` hors glissement. */
 	private textMoveDrag: TextMoveDrag | null = null;
+	/** Glissement en cours sur la poignée de taille du texte (voir TextFontDrag) — `null` hors glissement. */
+	private textFontDrag: TextFontDrag | null = null;
 	/**
 	 * Clic de l'outil texte sur une zone de texte EXISTANTE (voir
 	 * onPointerDown) : le geste démarre comme un déplacement (même
@@ -1241,7 +1289,8 @@ export class DrawView extends TextFileView {
 	 * geste de redimensionnement classique.
 	 */
 	private recognizedShape: ShapeElement | null = null;
-	private recognizedShapeAnchor: { cx: number; cy: number; baseWidth: number; baseHeight: number } | null = null;
+	/** `baseDist` : distance du stylet au centre AU MOMENT de la reconnaissance — référence de l'échelle (voir updateRecognizedShapeScale). */
+	private recognizedShapeAnchor: { cx: number; cy: number; baseWidth: number; baseHeight: number; baseDist: number } | null = null;
 	/** Minuteur de conversion par maintien (voir armStillnessTimer) ; jamais actif après conversion, ni pour la gomme. */
 	private strokeHoldTimer: number | null = null;
 	/** Position à laquelle le minuteur a été (ré)armé — tout mouvement au-delà de STRAIGHTEN_STILL_THRESHOLD_PX le réarme ailleurs. */
@@ -1895,6 +1944,12 @@ export class DrawView extends TextFileView {
 				return false;
 			});
 		}
+		this.scope.register([], TOOLBAR_TOGGLE_KEY, (evt) => {
+			if (this.isTypingInField()) return;
+			evt.preventDefault();
+			this.toggleToolbar();
+			return false;
+		});
 
 		this.buildToolbar();
 		// Un clic dans la barre d'outils (pastille de couleur, bouton
@@ -1928,6 +1983,15 @@ export class DrawView extends TextFileView {
 		this.activeCanvas = this.wrapper.createEl("canvas", {
 			cls: "quillstone-canvas quillstone-canvas-active",
 		});
+		// Petit bouton flottant qui rouvre la barre d'outils repliée (voir
+		// setToolbarHidden) — seul reste visible de la barre dans ce cas.
+		this.toolbarRevealBtn = this.wrapper.createDiv({ cls: "clickable-icon quillstone-toolbar-reveal" });
+		setIcon(this.toolbarRevealBtn, "chevron-down");
+		const revealLabel = `Show toolbar (${TOOLBAR_TOGGLE_KEY.toUpperCase()})`;
+		this.toolbarRevealBtn.setAttribute("aria-label", revealLabel);
+		setTooltip(this.toolbarRevealBtn, revealLabel);
+		this.toolbarRevealBtn.addEventListener("click", () => this.setToolbarHidden(false));
+		this.setToolbarHidden(this.plugin.settings.toolbarHidden, false);
 
 		const committedCtx = this.committedCanvas.getContext("2d");
 		const activeCtx = this.activeCanvas.getContext("2d");
@@ -1997,6 +2061,7 @@ export class DrawView extends TextFileView {
 		this.committedCanvas.addEventListener("pointermove", this.onPointerMove);
 		this.committedCanvas.addEventListener("pointerup", this.onPointerUp);
 		this.committedCanvas.addEventListener("pointercancel", this.onPointerCancel);
+		this.committedCanvas.addEventListener("lostpointercapture", this.onLostPointerCapture);
 		this.committedCanvas.addEventListener("pointerleave", this.onPointerLeave);
 		// Bug documenté de Safari/WKWebView sur iPad (iOS 14+) : sa fonction
 		// "Scribble" peut intercepter silencieusement des PointerEvent du
@@ -2074,6 +2139,7 @@ export class DrawView extends TextFileView {
 		this.committedCanvas?.removeEventListener("pointermove", this.onPointerMove);
 		this.committedCanvas?.removeEventListener("pointerup", this.onPointerUp);
 		this.committedCanvas?.removeEventListener("pointercancel", this.onPointerCancel);
+		this.committedCanvas?.removeEventListener("lostpointercapture", this.onLostPointerCapture);
 		this.committedCanvas?.removeEventListener("pointerleave", this.onPointerLeave);
 		this.committedCanvas?.removeEventListener("touchstart", this.onNativeTouchEvent);
 		this.committedCanvas?.removeEventListener("touchmove", this.onNativeTouchEvent);
@@ -3794,6 +3860,24 @@ export class DrawView extends TextFileView {
 		this.updateCursor();
 		this.scheduleCacheRegenAfterSettle();
 
+		// Fin d'un pincement par le lever d'UN seul doigt : l'autre, encore
+		// posé, enchaîne aussitôt sur un défilement à un doigt depuis sa
+		// position COURANTE (aucun saut de la vue) — sans ça, ce doigt restait
+		// inerte jusqu'à être levé puis reposé, et le défilement à un doigt
+		// semblait cassé après chaque zoom (voir le bug signalé).
+		if (gesture.type === "pinch") {
+			const remainingId = gesture.pointerIds.find((id) => id !== pointerId);
+			const remaining = remainingId !== undefined ? this.pointers.get(remainingId) : undefined;
+			if (remaining && remainingId !== undefined && !this.ignoredPointerIds.has(remainingId) && this.countActiveTouches() === 1) {
+				this.startPanGesture(remaining, false);
+				// Jamais un "tap" sur un lien de PDF : ce doigt vient de zoomer,
+				// le lever sans bouger ne doit rien ouvrir (voir plus bas).
+				const pan = this.viewportGesture as ViewportGesture | null;
+				if (pan?.type === "pan") pan.linkHit = null;
+			}
+			return;
+		}
+
 		// Panoramique qui n'a finalement pas bougé, débuté sur un lien de PDF :
 		// c'était un simple tap (doigt) ou un clic (outil main, barre d'espace)
 		// sur ce lien, qu'on suit donc ici — jamais pendant le geste lui-même,
@@ -3934,13 +4018,10 @@ export class DrawView extends TextFileView {
 		for (const tool of TOOLS) {
 			const btn = tools.createDiv({ cls: "clickable-icon" });
 			setIcon(btn, TOOL_ICONS[tool]);
-			// Jamais de raccourci codé en dur dans l'info-bulle : les raccourcis
-			// d'outil sont des commandes Obsidian ordinaires (voir
-			// main.ts:onload, addToolCommand), donc réglables — un indice figé
-			// ici pourrait afficher une touche que l'utilisateur a réassignée
-			// depuis Paramètres > Raccourcis clavier, où la vraie affectation
-			// courante reste toujours consultable.
-			btn.setAttribute("aria-label", TOOL_LABELS[tool]);
+			// Info-bulle avec la touche du Scope de la vue (voir TOOL_SHORTCUTS),
+			// par exemple « Pen (P) ».
+			btn.setAttribute("aria-label", toolLabelWithShortcut(tool));
+			setTooltip(btn, toolLabelWithShortcut(tool));
 			btn.addEventListener("click", () => this.setTool(tool));
 			this.toolButtons.set(tool, btn);
 		}
@@ -4166,11 +4247,41 @@ export class DrawView extends TextFileView {
 		setTooltip(this.pageIndicatorEl, "Go to page…");
 		this.pageIndicatorEl.addEventListener("click", () => this.promptGoToPage());
 
+		// Replier la barre d'outils pour agrandir la feuille (voir
+		// setToolbarHidden) — en tout dernier, à droite.
+		const collapseGroup = this.toolbarEl.createDiv({ cls: "quillstone-toolbar-group quillstone-toolbar-collapse-group" });
+		const collapseBtn = collapseGroup.createDiv({ cls: "clickable-icon" });
+		setIcon(collapseBtn, "chevron-up");
+		const collapseLabel = `Hide toolbar (${TOOLBAR_TOGGLE_KEY.toUpperCase()})`;
+		collapseBtn.setAttribute("aria-label", collapseLabel);
+		setTooltip(collapseBtn, collapseLabel);
+		collapseBtn.addEventListener("click", () => this.setToolbarHidden(true));
+
 		this.syncToolbarState();
 		this.updateHistoryButtons();
 		this.updateZoomLabel();
 		this.updatePageIndicator();
 		this.updateSelectionActionsToolbar();
+	}
+
+	/** Publique : aussi appelée par la commande "toggle-toolbar" (voir main.ts:onload). */
+	toggleToolbar(): void {
+		this.setToolbarHidden(!this.plugin.settings.toolbarHidden);
+	}
+
+	/**
+	 * Replie ou rouvre la barre d'outils : la feuille récupère toute la
+	 * hauteur libérée (le ResizeObserver du volet redimensionne les canevas
+	 * de lui-même). Mémorisé dans les réglages (`persist`), pour toutes les
+	 * feuilles.
+	 */
+	private setToolbarHidden(hidden: boolean, persist = true): void {
+		this.toolbarEl?.toggle(!hidden);
+		this.toolbarRevealBtn?.toggle(hidden);
+		if (persist && this.plugin.settings.toolbarHidden !== hidden) {
+			this.plugin.settings.toolbarHidden = hidden;
+			void this.plugin.saveSettings();
+		}
 	}
 
 	/** Menu listant les quatre formes prédéfinies (voir SHAPE_TOOLS), une coche sur celle actuellement active — ouvert depuis l'unique bouton "Formes" de la barre d'outils (voir shapesMenuBtn), plutôt que quatre icônes toujours affichées. */
@@ -4454,9 +4565,20 @@ export class DrawView extends TextFileView {
 	 * en cours, ou la couleur qui change n'est pas celle que cette zone suit).
 	 */
 	private applyLiveTextColor(tool: ColorableTool, color: string): void {
-		if (!this.textEditor || tool !== this.activeColorTool) return;
-		this.textEditor.draft.color = color;
-		this.textEditor.ta.setCssStyles({ color });
+		const session = this.textEditor;
+		if (!session || tool !== this.activeColorTool) return;
+		// Texte sélectionné dans le textarea : seule cette plage change de
+		// couleur (plusieurs couleurs dans une même zone, voir
+		// TextElement.colorRuns). Sans sélection : seuls les caractères tapés
+		// ENSUITE prennent cette couleur, le texte déjà tapé garde la sienne.
+		// (Une zone existante rouverte en édition a tout son texte
+		// sélectionné d'emblée, voir startTextEditing : la recolorer en entier
+		// reste donc le geste le plus direct, comme avant.)
+		const { selectionStart, selectionEnd } = session.ta;
+		for (let i = selectionStart; i < selectionEnd; i++) session.charColors[i] = color;
+		session.typingColor = color;
+		session.ta.setCssStyles({ caretColor: color });
+		this.renderTextMirror();
 	}
 
 	/**
@@ -4637,6 +4759,7 @@ export class DrawView extends TextFileView {
 		if (!this.textEditor) return;
 		this.textEditor.draft.align = align;
 		this.textEditor.ta.setCssStyles({ textAlign: align });
+		this.syncTextMirror();
 		this.syncTextAlignToolbar();
 	}
 
@@ -5023,7 +5146,10 @@ export class DrawView extends TextFileView {
 		this.strokeHoldTimer = window.setTimeout(() => {
 			this.strokeHoldTimer = null;
 			if (this.straightLine) {
-				this.lockStraightLineVertex();
+				// Premier maintien après le redressement : fixe l'angle du segment
+				// (voir lockStraightLineAngle) ; le suivant verrouille un coin.
+				if (!this.straightLine.angleLocked && this.straightLine.snapAngleDeg !== null) this.lockStraightLineAngle();
+				else this.lockStraightLineVertex();
 			} else {
 				this.triggerHoldConversion();
 			}
@@ -5085,13 +5211,11 @@ export class DrawView extends TextFileView {
 				// trait tillé reste tillé, jamais remplacé par un contour
 				// plein (voir le bug signalé).
 				...(this.activeStroke.dashed ? { dashed: true } : {}),
+				// Reste translucide comme le surligneur d'origine (voir
+				// ShapeElement.highlighter, model.ts).
+				...(this.activeStroke.tool === "highlighter" ? { highlighter: true } : {}),
 			};
-			this.recognizedShapeAnchor = {
-				cx: candidate.x + candidate.width / 2,
-				cy: candidate.y + candidate.height / 2,
-				baseWidth: candidate.width,
-				baseHeight: candidate.height,
-			};
+			this.recognizedShapeAnchor = this.makeRecognizedShapeAnchor(candidate);
 			if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
 				navigator.vibrate(STRAIGHTEN_HAPTIC_MS);
 			}
@@ -5123,13 +5247,11 @@ export class DrawView extends TextFileView {
 				// Voir la même remarque dans la branche recognizeClosedShape
 				// ci-dessus — ici pour une ligne brisée ouverte.
 				...(this.activeStroke.dashed ? { dashed: true } : {}),
+				// Reste translucide comme le surligneur d'origine (voir
+				// ShapeElement.highlighter, model.ts).
+				...(this.activeStroke.tool === "highlighter" ? { highlighter: true } : {}),
 			};
-			this.recognizedShapeAnchor = {
-				cx: polyline.x + polyline.width / 2,
-				cy: polyline.y + polyline.height / 2,
-				baseWidth: polyline.width,
-				baseHeight: polyline.height,
-			};
+			this.recognizedShapeAnchor = this.makeRecognizedShapeAnchor(polyline);
 			if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
 				navigator.vibrate(STRAIGHTEN_HAPTIC_MS);
 			}
@@ -5410,15 +5532,39 @@ export class DrawView extends TextFileView {
 	 * évidente à saisir. Toujours centrée sur son centre d'origine, et
 	 * jamais agrandie au-delà des limites de la page.
 	 */
+	/**
+	 * Ancre d'échelle d'une forme tout juste reconnue. La référence est la
+	 * distance RÉELLE du stylet au centre à cet instant (dernier point du
+	 * tracé) — jamais la demi-diagonale du cadre : le stylet est posé sur le
+	 * contour, pas sur un coin, donc pour un rond la demi-diagonale valait
+	 * √2 fois cette distance, et la forme rétrécissait d'environ 30 % dès le
+	 * relâchement (voir le bug signalé).
+	 */
+	private makeRecognizedShapeAnchor(box: { x: number; y: number; width: number; height: number }): {
+		cx: number;
+		cy: number;
+		baseWidth: number;
+		baseHeight: number;
+		baseDist: number;
+	} {
+		const cx = box.x + box.width / 2;
+		const cy = box.y + box.height / 2;
+		const pts = this.activeStroke?.points ?? [];
+		const last = pts[pts.length - 1];
+		const baseDist = last ? Math.hypot(last[0] - cx, last[1] - cy) : Math.hypot(box.width / 2, box.height / 2);
+		return { cx, cy, baseWidth: box.width, baseHeight: box.height, baseDist };
+	}
+
 	private updateRecognizedShapeScale(current: [number, number]): void {
 		const shape = this.recognizedShape;
 		const anchor = this.recognizedShapeAnchor;
 		if (!shape || !anchor || this.activeStrokePageIndex === null) return;
 
-		const baseRadius = Math.hypot(anchor.baseWidth / 2, anchor.baseHeight / 2);
-		if (baseRadius < 1e-6) return;
+		// Stylet trop près du centre au moment de la reconnaissance : aucune
+		// référence fiable, la forme garde simplement sa taille reconnue.
+		if (anchor.baseDist < 1) return;
 		const dist = Math.hypot(current[0] - anchor.cx, current[1] - anchor.cy);
-		const scale = clamp(dist / baseRadius, 0.2, 5);
+		const scale = clamp(dist / anchor.baseDist, 0.2, 5);
 
 		const page = this.pages[this.activeStrokePageIndex].page;
 		const maxHalfWidth = Math.min(anchor.cx, page.width - anchor.cx);
@@ -5443,6 +5589,7 @@ export class DrawView extends TextFileView {
 	 */
 	private triggerStraighten(isDirect: boolean): void {
 		if (!this.activeStroke || this.straightLine || this.activeStrokePageIndex === null) return;
+		const holdAnchor = this.strokeHoldAnchor;
 		this.clearStillnessTimer();
 
 		const pts = this.activeStroke.points;
@@ -5460,11 +5607,39 @@ export class DrawView extends TextFileView {
 			pressureSum,
 			pressureCount: pts.length - 1,
 			snapAngleDeg: null,
+			angleLocked: false,
+			lastRawEnd: [last[0], last[1]],
 		};
 
 		this.updateStraightLine(this.activeStrokePageIndex, [last[0], last[1]], false, false, last[2]);
 
-		if (!isDirect) this.playStraightenFeedback();
+		if (!isDirect) {
+			this.playStraightenFeedback();
+			// Réarmé tout de suite, depuis la même position : rester encore
+			// immobile fixe alors l'angle (voir lockStraightLineAngle), même si
+			// le stylet ne renvoie plus aucun mouvement d'ici là.
+			if (holdAnchor && this.plugin.settings.straightenOnHold) this.armStillnessTimer(holdAnchor);
+		}
+	}
+
+	/**
+	 * Maintien immobile une fois la ligne déjà redressée (voir le dispatch
+	 * dans armStillnessTimer) : fixe l'angle du segment courant au multiple
+	 * de ANGLE_SNAP_STEP_DEG le plus proche, tout de suite (sur la dernière
+	 * extrémité brute, voir StraightLineState.lastRawEnd) et pour le reste
+	 * de ce segment. Un maintien de plus verrouille ensuite un coin (voir
+	 * lockStraightLineVertex).
+	 */
+	private lockStraightLineAngle(): void {
+		const sl = this.straightLine;
+		if (!sl || this.activeStrokePageIndex === null) return;
+		// Même raison que dans lockStraightLineVertex : le prochain mouvement,
+		// même infime, doit réarmer un minuteur neuf.
+		this.clearStillnessTimer();
+		sl.angleLocked = true;
+		this.updateStraightLine(this.activeStrokePageIndex, sl.lastRawEnd, false, false, null);
+		this.playStraightenFeedback();
+		this.scheduleActiveRedraw();
 	}
 
 	/**
@@ -5502,6 +5677,7 @@ export class DrawView extends TextFileView {
 
 		sl.vertices.push([freeEnd[0], freeEnd[1]]);
 		sl.snapAngleDeg = null;
+		sl.angleLocked = false;
 		this.playStraightenFeedback();
 		this.scheduleActiveRedraw();
 	}
@@ -5510,21 +5686,25 @@ export class DrawView extends TextFileView {
 	 * Recalcule l'extrémité libre du segment COURANT (depuis le dernier
 	 * sommet verrouillé, voir StraightLineState.vertices — pas forcément
 	 * l'origine du trait entier) à partir d'une position brute (repère de
-	 * `pageIndex`), avec aimantation angulaire : TOUJOURS aimantée au
-	 * multiple de 15° le plus proche (voir ANGLE_SNAP_TOLERANCE_DEG — Maj
-	 * maintenue ne fait donc plus de différence, mais reste acceptée),
-	 * sauf Alt maintenue, qui garde l'angle brut, volontairement oblique.
+	 * `pageIndex`) : angle réel du geste, sauf une fois l'angle fixé par un
+	 * maintien (voir StraightLineState.angleLocked) ou Maj maintenue — alors
+	 * aimanté au multiple de ANGLE_SNAP_STEP_DEG le plus proche. Alt garde
+	 * toujours l'angle brut. `pressure` null : simple recalcul sur place,
+	 * sans compter de nouvelle pression (voir lockStraightLineAngle).
 	 * Réécrit
 	 * activeStroke.points en 2 points dont la pression est la moyenne courante
 	 * — c'est cette identité de pression aux deux extrémités qui garantit une
 	 * épaisseur constante côté rendu (voir render.ts:drawPenStroke, cas à 2 points).
 	 */
-	private updateStraightLine(pageIndex: number, rawEnd: [number, number], shiftKey: boolean, altKey: boolean, pressure: number): void {
+	private updateStraightLine(pageIndex: number, rawEnd: [number, number], shiftKey: boolean, altKey: boolean, pressure: number | null): void {
 		const sl = this.straightLine;
 		if (!sl || !this.activeStroke) return;
 
-		sl.pressureSum += pressure;
-		sl.pressureCount += 1;
+		if (pressure !== null) {
+			sl.pressureSum += pressure;
+			sl.pressureCount += 1;
+		}
+		sl.lastRawEnd = [rawEnd[0], rawEnd[1]];
 		const avgPressure = sl.pressureSum / sl.pressureCount;
 
 		const [ox, oy] = sl.vertices[sl.vertices.length - 1];
@@ -5538,9 +5718,7 @@ export class DrawView extends TextFileView {
 		if (dist > 0.001) {
 			const rawAngle = Math.atan2(dy, dx) * (180 / Math.PI);
 			const snappedAngle = Math.round(rawAngle / ANGLE_SNAP_STEP_DEG) * ANGLE_SNAP_STEP_DEG;
-			let diff = Math.abs(rawAngle - snappedAngle);
-			if (diff > 180) diff = 360 - diff;
-			const shouldSnap = !altKey && (shiftKey || diff <= ANGLE_SNAP_TOLERANCE_DEG);
+			const shouldSnap = !altKey && (shiftKey || sl.angleLocked);
 			angleDeg = shouldSnap ? snappedAngle : rawAngle;
 
 			const rad = angleDeg * (Math.PI / 180);
@@ -5648,6 +5826,7 @@ export class DrawView extends TextFileView {
 			// ShapeElement.dashed, model.ts) : une ligne droite à plusieurs
 			// segments redressée à partir d'un trait tillé reste tillée.
 			...(this.activeStroke.dashed ? { dashed: true } : {}),
+			...(this.activeStroke.tool === "highlighter" ? { highlighter: true } : {}),
 		};
 	}
 
@@ -6339,6 +6518,20 @@ export class DrawView extends TextFileView {
 		this.activePointerId = null;
 	};
 
+	/**
+	 * Capture perdue SANS pointerup/pointercancel (le WebView peut en avaler
+	 * un pendant un pincement, sur iPad notamment) : traité comme une
+	 * annulation. Sinon ce doigt restait compté comme posé (voir
+	 * this.pointers/countActiveTouches) et tout doigt suivant, seul, était pris
+	 * pour le second doigt d'un pincement — plus aucun défilement à un doigt
+	 * jusqu'à la réouverture de la feuille. Après un pointerup normal, ce
+	 * pointeur n'est déjà plus suivi : sans effet.
+	 */
+	private onLostPointerCapture = (event: PointerEvent): void => {
+		if (!this.pointers.has(event.pointerId) && !this.ignoredPointerIds.has(event.pointerId)) return;
+		this.onPointerCancel(event);
+	};
+
 	private onPointerCancel = (event: PointerEvent): void => {
 		this.ignoredPointerIds.delete(event.pointerId);
 		this.palmCandidates.delete(event.pointerId);
@@ -6486,10 +6679,9 @@ export class DrawView extends TextFileView {
 			this.markDirtyRegion(pageIndex, computeElementBounds(recognized), recognized.size);
 			this.flushCommittedRedraw(pageIndex);
 
-			// Même geste qu'une forme tracée avec la palette (voir finishShape)
-			// — voir selectNewlyCreatedShape, et settings.autoSelectShapeAfterCreate
-			// pour le désactiver.
-			this.selectNewlyCreatedShape(pageIndex, recognized.id);
+			// Reste sur le stylo/surligneur qui l'a tracée (demandé
+			// explicitement) : jamais de bascule vers une sélection, on continue
+			// d'écrire tout de suite.
 			return;
 		}
 
@@ -6602,12 +6794,10 @@ export class DrawView extends TextFileView {
 			if (isShapeTool(this.plugin.settings.tool)) this.setTool("pen");
 			return;
 		}
-		// setTool() remet returnToPenAfterDeselect à faux : il faut donc
-		// l'armer APRÈS cet appel, jamais avant.
-		this.setTool("select");
+		// Curseur (jamais le lasso), et il y reste : aucun retour automatique
+		// au stylo au clic suivant (returnToPenAfterDeselect laissé désarmé).
+		this.setTool("cursor");
 		this.setSelection(pageIndex, [shapeId]);
-		this.returnToPenAfterDeselect = true;
-		this.autoSelectShapeId = shapeId;
 	}
 
 	/**
@@ -6713,10 +6903,17 @@ export class DrawView extends TextFileView {
 		if (!box || pageIndex === null) return;
 
 		const size = this.plugin.settings.size;
-		const fontSizePx = this.plugin.settings.fontSizePx;
 		const font = this.plugin.settings.font;
 		const scale = this.viewport.scale;
 		const dragged = box.width * scale >= TEXT_DRAG_MIN_SCREEN_PX || box.height * scale >= TEXT_DRAG_MIN_SCREEN_PX;
+		// Taille de police tirée de la zone dessinée : une ligne remplit
+		// exactement sa hauteur — une petite zone donne un petit texte, une
+		// grande un grand, au lieu d'imposer la taille par défaut (qui
+		// agrandissait d'office une zone dessinée petite, voir le bug
+		// signalé). Simple clic, sans zone dessinée : TEXT_CLICK_FONT_SIZE_PX.
+		const fontSizePx = dragged
+			? clamp(Math.round(box.height / TEXT_LINE_HEIGHT_RATIO), MIN_FONT_SIZE_PX, MAX_FONT_SIZE_PX)
+			: TEXT_CLICK_FONT_SIZE_PX;
 		const width = dragged ? Math.max(TEXT_BOX_MIN_WIDTH_PX, box.width) : TEXT_DEFAULT_WIDTH;
 		// La hauteur DESSINÉE (box.height) sert de PLANCHER, jamais de valeur
 		// fixe : measureTextHeight("", ...) vaut toujours une seule ligne (rien
@@ -6759,9 +6956,16 @@ export class DrawView extends TextFileView {
 	private startTextEditing(pageIndex: number, element: TextElement, isNew: boolean, autoFitWidth = false): void {
 		if (this.textEditor) this.finishTextEditing(true);
 
+		// Calque coloré, posé PAR-DESSUS le textarea mais transparent aux
+		// clics (voir .quillstone-text-mirror, styles.css) — créé avant les
+		// poignées, qui restent donc au-dessus de lui à z-index égal.
+		const mirror = this.wrapper.createDiv({ cls: "quillstone-text-mirror" });
 		const ta = this.wrapper.createEl("textarea", { cls: "quillstone-text-editor" });
 		ta.value = element.text;
 		ta.spellcheck = false;
+		// Sans ça, un <textarea> vaut 2 lignes par défaut (rows="2") : une
+		// ligne vide restait sous le texte tapé, la zone ne l'épousait jamais.
+		ta.rows = 1;
 
 		// cloneElement (jamais `element` par référence) : les changements de
 		// couleur/alignement en direct pendant cette édition (voir
@@ -6798,6 +7002,13 @@ export class DrawView extends TextFileView {
 		moveHandle.addEventListener("pointerup", this.onTextMoveHandlePointerUp);
 		moveHandle.addEventListener("pointercancel", this.onTextMoveHandlePointerUp);
 
+		const fontHandle = this.wrapper.createDiv({ cls: "quillstone-text-font-handle" });
+		setTooltip(fontHandle, "Drag to resize the text");
+		fontHandle.addEventListener("pointerdown", this.onTextFontHandlePointerDown);
+		fontHandle.addEventListener("pointermove", this.onTextFontHandlePointerMove);
+		fontHandle.addEventListener("pointerup", this.onTextFontHandlePointerUp);
+		fontHandle.addEventListener("pointercancel", this.onTextFontHandlePointerUp);
+
 		this.textEditor = {
 			ta,
 			pageIndex,
@@ -6806,8 +7017,14 @@ export class DrawView extends TextFileView {
 			autoFitWidth,
 			resizeHandle,
 			moveHandle,
+			fontHandle,
+			mirror,
+			charColors: expandTextColors(element),
+			prevText: element.text,
+			typingColor: element.color,
 		};
 		this.positionTextEditor(pageIndex, element);
+		this.renderTextMirror();
 		this.positionTextResizeHandle();
 		// Pour l'édition d'une boîte déjà présente (pas une création) :
 		// regénère tout de suite le cache de rendu SANS cette boîte (voir
@@ -6817,7 +7034,10 @@ export class DrawView extends TextFileView {
 		// cours, un dédoublement visuel trompeur (voir le bug signalé).
 		if (!isNew) this.render(pageIndex);
 
-		ta.addEventListener("input", () => this.scheduleTextAreaAutoGrow(ta));
+		ta.addEventListener("input", () => {
+			this.onTextEditorInput();
+			this.scheduleTextAreaAutoGrow(ta);
+		});
 		ta.addEventListener("blur", (evt) => {
 			// Exception : perdre le focus VERS fontSizeInput (voir son
 			// exemption dans le mousedown de la barre d'outils, onOpen) ne
@@ -6845,8 +7065,8 @@ export class DrawView extends TextFileView {
 		window.requestAnimationFrame(() => {
 			ta.focus();
 			if (!isNew) ta.select();
-			ta.setCssStyles({ height: "auto" });
-			ta.setCssStyles({ height: `${ta.scrollHeight}px` });
+			this.fitTextAreaHeight(ta);
+			this.positionTextResizeHandle();
 		});
 
 		// Groupes couleur/alignement de la barre d'outils : pertinents dès
@@ -6874,14 +7094,20 @@ export class DrawView extends TextFileView {
 		window.requestAnimationFrame(() => {
 			this.textAreaResizeScheduled = false;
 			if (this.textEditor?.ta !== ta) return; // édition déjà terminée (ou une autre a commencé) entre-temps
-			ta.setCssStyles({ height: "auto" });
-			ta.setCssStyles({ height: `${ta.scrollHeight}px` });
+			this.fitTextAreaHeight(ta);
 			// La hauteur vient de changer : resizeHandle, calée sur le coin
 			// bas-droit du textarea (voir positionTextResizeHandle), doit la
 			// suivre — sinon elle resterait à l'ancienne hauteur, détachée du
 			// vrai coin dès la ligne suivante tapée.
 			this.positionTextResizeHandle();
 		});
+	}
+
+	/** Hauteur du textarea = son contenu exact (bordure comprise : `box-sizing: border-box`, alors que scrollHeight l'exclut), jamais sous son `min-height`. */
+	private fitTextAreaHeight(ta: HTMLTextAreaElement): void {
+		ta.setCssStyles({ height: "auto" });
+		const border = ta.offsetHeight - ta.clientHeight;
+		ta.setCssStyles({ height: `${ta.scrollHeight + border}px` });
 	}
 
 	/**
@@ -6904,7 +7130,138 @@ export class DrawView extends TextFileView {
 			left: `${session.ta.offsetLeft}px`,
 			top: `${session.ta.offsetTop}px`,
 		});
+		// Juste à droite de resizeHandle (22px + un petit espace, voir
+		// styles.css), à la même hauteur.
+		session.fontHandle.setCssStyles({
+			left: `${session.ta.offsetLeft + session.ta.offsetWidth + 28}px`,
+			top: `${session.ta.offsetTop + session.ta.offsetHeight}px`,
+		});
+		this.syncTextMirror();
 	}
+
+	/**
+	 * Recale le calque coloré (voir TextEditorSession.mirror) sur le
+	 * textarea : position, taille ET tout ce qui influe sur le retour à la
+	 * ligne (police, taille, interligne, marges, alignement) — appelée après
+	 * chaque changement de géométrie, via positionTextResizeHandle.
+	 */
+	private syncTextMirror(): void {
+		const session = this.textEditor;
+		if (!session) return;
+		const ta = session.ta;
+		const cs = window.getComputedStyle(ta);
+		session.mirror.setCssStyles({
+			left: `${ta.offsetLeft}px`,
+			top: `${ta.offsetTop}px`,
+			width: `${ta.offsetWidth}px`,
+			height: `${ta.offsetHeight}px`,
+			fontSize: cs.fontSize,
+			fontFamily: cs.fontFamily,
+			lineHeight: cs.lineHeight,
+			padding: cs.padding,
+			textAlign: cs.textAlign,
+			letterSpacing: cs.letterSpacing,
+		});
+	}
+
+	/** Reconstruit le contenu du calque coloré : un <span> par suite de caractères de même couleur (voir TextEditorSession.charColors). */
+	private renderTextMirror(): void {
+		const session = this.textEditor;
+		if (!session) return;
+		const text = session.ta.value;
+		const colors = session.charColors;
+		session.mirror.empty();
+		let start = 0;
+		for (let i = 1; i <= text.length; i++) {
+			if (i < text.length && colors[i] === colors[start]) continue;
+			session.mirror.createSpan({ text: text.slice(start, i) }).setCssStyles({ color: colors[start] });
+			start = i;
+		}
+	}
+
+	/**
+	 * "input" du textarea : repère la plage remplacée (préfixe et suffixe
+	 * communs avec prevText) et y insère la couleur de frappe en cours (voir
+	 * typingColor) — ce qui garde chaque caractère déjà tapé à sa couleur,
+	 * qu'on écrive au milieu, colle, supprime ou remplace une sélection.
+	 */
+	private onTextEditorInput(): void {
+		const session = this.textEditor;
+		if (!session) return;
+		const before = session.prevText;
+		const after = session.ta.value;
+		let prefix = 0;
+		const maxPrefix = Math.min(before.length, after.length);
+		while (prefix < maxPrefix && before[prefix] === after[prefix]) prefix++;
+		let suffix = 0;
+		const maxSuffix = Math.min(before.length, after.length) - prefix;
+		while (suffix < maxSuffix && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix++;
+		const inserted = after.length - prefix - suffix;
+		session.charColors.splice(prefix, before.length - prefix - suffix, ...new Array<string>(inserted).fill(session.typingColor));
+		session.prevText = after;
+		this.renderTextMirror();
+	}
+
+	/** pointerdown sur fontHandle : même mécanique que resizeHandle (capture sur la poignée, preventDefault pour que le textarea garde le focus). */
+	private onTextFontHandlePointerDown = (event: PointerEvent): void => {
+		if (!this.textEditor || event.button !== 0) return;
+		event.preventDefault();
+		event.stopPropagation();
+		this.textEditor.fontHandle.setPointerCapture(event.pointerId);
+		this.textFontDrag = {
+			pointerId: event.pointerId,
+			startClientX: event.clientX,
+			startClientY: event.clientY,
+			startFontSizePx: this.textEditor.draft.fontSizePx ?? this.plugin.settings.fontSizePx,
+			startWidth: this.textEditor.draft.width,
+			startHeight: this.textEditor.draft.height,
+		};
+	};
+
+	/**
+	 * Étirer vers le bas/la droite agrandit le texte, vers le haut/la gauche
+	 * le réduit : le facteur suit la moyenne des deux axes, rapportée à la
+	 * taille de la boîte au pointerdown. La largeur (et le plancher de
+	 * hauteur) suivent la police dans la même proportion — le texte grossit
+	 * ainsi d'un bloc, sans se recouper autrement.
+	 */
+	private onTextFontHandlePointerMove = (event: PointerEvent): void => {
+		const drag = this.textFontDrag;
+		const session = this.textEditor;
+		if (!drag || !session || event.pointerId !== drag.pointerId) return;
+		event.preventDefault();
+		const scale = this.viewport.scale;
+		const dx = (event.clientX - drag.startClientX) / scale;
+		const dy = (event.clientY - drag.startClientY) / scale;
+		const rawFactor = ((drag.startWidth + dx) / drag.startWidth + (drag.startHeight + dy) / Math.max(1, drag.startHeight)) / 2;
+		const fontSizePx = clamp(Math.round(drag.startFontSizePx * Math.max(0.05, rawFactor)), MIN_FONT_SIZE_PX, MAX_FONT_SIZE_PX);
+		const factor = fontSizePx / drag.startFontSizePx;
+		const width = clamp(drag.startWidth * factor, TEXT_BOX_MIN_WIDTH_PX, TEXT_RESIZE_MAX_WIDTH_PX);
+		const height = Math.max(TEXT_RESIZE_MIN_HEIGHT_PX, drag.startHeight * factor);
+		session.draft.fontSizePx = fontSizePx;
+		session.draft.width = width;
+		session.draft.height = height;
+		session.ta.setCssStyles({
+			fontSize: `${fontSizePx * scale}px`,
+			width: `${width * scale}px`,
+			minHeight: `${height * scale}px`,
+		});
+		if (this.fontSizeInput) this.fontSizeInput.value = String(fontSizePx);
+		this.scheduleTextAreaAutoGrow(session.ta);
+		this.positionTextResizeHandle();
+	};
+
+	/** Fin du glissement : la taille obtenue devient celle des PROCHAINES zones de texte, comme une saisie dans le champ numérique de la barre d'outils (voir setFontSizePx). */
+	private onTextFontHandlePointerUp = (event: PointerEvent): void => {
+		if (!this.textFontDrag || event.pointerId !== this.textFontDrag.pointerId) return;
+		this.textFontDrag = null;
+		const fontSizePx = this.textEditor?.draft.fontSizePx;
+		if (fontSizePx !== undefined) {
+			this.plugin.settings.fontSizePx = fontSizePx;
+			void this.plugin.saveSettings();
+		}
+		this.syncToolbarState();
+	};
 
 	/**
 	 * pointerdown sur resizeHandle : amorce un glissement largeur ET
@@ -7025,7 +7382,9 @@ export class DrawView extends TextFileView {
 			fontFamily: TEXT_FONT_STACKS[element.font ?? "sans"],
 			lineHeight: `${TEXT_LINE_HEIGHT_RATIO}`,
 			padding: `${TEXT_PADDING_PX * scale}px`,
-			color: element.color,
+			// Le texte lui-même reste transparent (voir styles.css) : c'est le
+			// calque coloré dessous qui l'affiche (voir TextEditorSession.mirror).
+			caretColor: element.color,
 			textAlign: element.align ?? "left",
 		});
 	}
@@ -7046,8 +7405,11 @@ export class DrawView extends TextFileView {
 		this.textEditor = null;
 		this.textResizeDrag = null; // un glissement de resizeHandle encore en cours n'a plus de poignée à suivre
 		this.textMoveDrag = null;
+		this.textFontDrag = null;
 		session.resizeHandle.remove();
 		session.moveHandle.remove();
+		session.fontHandle.remove();
+		session.mirror.remove();
 		session.ta.remove();
 		// this.textEditor déjà nul : pageElementsForRender ne filtre plus rien,
 		// ce qui réaffiche aussitôt la boîte d'origine, inchangée, qu'elle
@@ -7068,7 +7430,12 @@ export class DrawView extends TextFileView {
 
 		const text = session.ta.value;
 		const pageIndex = session.pageIndex;
-		const color = session.draft.color;
+		// Plusieurs couleurs : TextElement.colorRuns, `color` gardant celle du
+		// premier caractère ; une seule : `color` seule, sans colorRuns, comme
+		// une zone écrite avant cette fonctionnalité. Une zone vide (création
+		// abandonnée plus bas) n'a pas de caractère : couleur de frappe.
+		const colorRuns = compressTextColors(session.charColors.slice(0, text.length));
+		const color = session.charColors[0] ?? session.typingColor;
 		// Normalisé dès ici (jamais `undefined` en aval) : sans ça, un élément
 		// existant écrit avant l'ajout de ce champ (align absent) comparerait
 		// toujours `undefined !== "left"` plus bas, même quand rien n'a
@@ -7094,27 +7461,18 @@ export class DrawView extends TextFileView {
 				this.syncToolbarState();
 				return;
 			}
-			let width = session.draft.width;
-			let height: number;
-			if (session.autoFitWidth) {
-				({ width, height } = measureTextBoxSize(text, fontSizePx, width, font));
-			} else {
-				height = measureTextHeight(text, width, fontSizePx, font);
-			}
-			// Ne descend jamais sous la hauteur déjà affichée au tout début de
-			// cette édition (session.draft.height — elle-même déjà plancherée à
-			// la hauteur DESSINÉE pour un glissement, voir finishTextBoxCreation) :
-			// sans ce second plancher ici, une boîte glissée haute mais où l'on
-			// tape ensuite moins de texte que ce que sa hauteur dessinée
-			// suggérait s'effondrerait quand même à la validation.
-			height = Math.max(height, session.draft.height);
-			const finalEl: TextElement = { ...session.draft, text, width, height, color, align, font, fontSizePx };
+			// Resserrée sur le texte réellement écrit (voir fitTextBoxToContent) :
+			// une boîte agrandie mais en partie vide ne garde jamais ce vide, la
+			// sélection au curseur/lasso épouse ensuite exactement le texte.
+			const { x, y, width, height } = this.fitTextBoxToContent(session.draft, text, fontSizePx, font, align);
+			const finalEl: TextElement = { ...session.draft, text, x, y, width, height, color, colorRuns, align, font, fontSizePx };
+			if (!colorRuns) delete finalEl.colorRuns;
 			this.addManyElements(pageIndex, [finalEl]);
-			// setTool() remet returnToPenAfterDeselect à faux : l'armer APRÈS,
-			// jamais avant (même contrainte que finishShape).
-			this.setTool("select");
-			this.returnToPenAfterDeselect = true;
-			this.autoSelectShapeId = finalEl.id;
+			// Bascule sur l'outil curseur, la zone sélectionnée, et y RESTE :
+			// jamais de retour automatique au stylo au clic suivant (voir
+			// returnToPenAfterDeselect, volontairement laissé désarmé ici).
+			this.setTool("cursor");
+			this.setSelection(pageIndex, [finalEl.id]);
 			return;
 		}
 
@@ -7130,58 +7488,79 @@ export class DrawView extends TextFileView {
 
 		if (!text.trim()) {
 			// Vidée entièrement : supprimée, comme n'importe quel élément sélectionné.
-			this.setTool("select");
+			this.setTool("cursor");
 			this.setSelection(pageIndex, [original.id]);
 			this.deleteSelection();
 			return;
 		}
 
 		// Largeur ET hauteur du textarea lui-même (voir resizeHandle,
-		// onTextResizeHandlePointerMove) : ajustables à la souris/au doigt
-		// PENDANT la frappe, directement depuis l'éditeur — sans avoir à
-		// rebasculer sur le curseur/lasso pour tirer une poignée de
-		// sélection (qui reste l'autre façon de faire, elle, hors édition,
-		// et qui elle met la police à l'échelle — voir DrawView.scaleElement).
-		// `session.draft.height` plutôt que `original.height` comme plancher
-		// juste en dessous : sinon, un glissement vertical de resizeHandle
-		// pendant CETTE édition serait oublié à la validation, retombant
-		// sur la hauteur d'AVANT cette édition.
-		const width = session.draft.width;
-		const draftHeight = session.draft.height;
+		// onTextResizeHandlePointerMove), ajustables PENDANT la frappe — puis
+		// resserrées sur le texte réellement écrit à la validation (voir
+		// fitTextBoxToContent), comme pour une création.
+		const fitted = this.fitTextBoxToContent(session.draft, text, fontSizePx, font, align);
 
 		if (
 			text !== original.text ||
 			color !== original.color ||
+			JSON.stringify(colorRuns ?? null) !== JSON.stringify(original.colorRuns ?? null) ||
 			align !== (original.align ?? "left") ||
 			font !== (original.font ?? "sans") ||
 			fontSizePx !== resolveTextFontSizePx(original) ||
-			width !== original.width ||
-			draftHeight !== original.height ||
-			session.draft.x !== original.x ||
-			session.draft.y !== original.y
+			fitted.width !== original.width ||
+			fitted.height !== original.height ||
+			fitted.x !== original.x ||
+			fitted.y !== original.y
 		) {
-			// Comme pour une création (voir plus haut) : la hauteur recalculée
-			// ne descend JAMAIS sous celle déjà affichée OU déjà tirée à la
-			// main pendant cette édition (voir draftHeight ci-dessus) — une
-			// boîte étirée garde donc l'espace qu'on lui a donné, même si le
-			// texte qu'elle contient tiendrait désormais sur moins de hauteur.
-			const height = Math.max(measureTextHeight(text, width, fontSizePx, font), draftHeight);
 			const updated: TextElement = {
 				...original,
 				text,
 				color,
+				colorRuns,
 				align,
 				font,
 				fontSizePx,
-				x: session.draft.x,
-				y: session.draft.y,
-				width,
-				height,
+				...fitted,
 			};
+			if (!colorRuns) delete updated.colorRuns;
 			this.replaceElement(pageIndex, this.cloneElement(original), updated);
 		}
-		this.setTool("select");
+		this.setTool("cursor");
 		this.setSelection(pageIndex, [original.id]);
+	}
+
+	/**
+	 * Cadre (repère de page) qui épouse exactement `text` dans `box` : largeur
+	 * ramenée à la plus longue ligne (le retour à la ligne reste identique —
+	 * chaque ligne tenait déjà dans cette largeur, aucun mot refusé ne tient
+	 * dans une largeur plus petite), hauteur ramenée aux lignes écrites (les
+	 * lignes vides en fin de texte ne comptent pas). Le texte ne bouge pas à
+	 * l'écran : le bord qui reste fixe suit l'alignement (gauche pour
+	 * "left"/"justify", centre pour "center", droite pour "right"), le haut
+	 * reste toujours fixe, rotation comprise. Ne fait que rétrécir, jamais
+	 * agrandir.
+	 */
+	private fitTextBoxToContent(
+		box: TextElement,
+		text: string,
+		fontSizePx: number,
+		font: TextFont,
+		align: TextAlign
+	): { x: number; y: number; width: number; height: number } {
+		const innerWidth = Math.max(1, box.width - TEXT_PADDING_PX * 2);
+		const contentWidth = Math.ceil(measureTextBoxSize(text, fontSizePx, innerWidth, font).width) + TEXT_PADDING_PX * 2;
+		const width = Math.min(box.width, contentWidth);
+		const height = Math.min(box.height, measureTextHeight(text.replace(/\s+$/, ""), box.width, fontSizePx, font));
+		const shiftX = align === "center" ? (box.width - width) / 2 : align === "right" ? box.width - width : 0;
+
+		// Centre du nouveau cadre, repère local de l'ancien (origine au
+		// centre, avant rotation) — puis tourné comme la boîte elle-même.
+		const localX = shiftX + width / 2 - box.width / 2;
+		const localY = height / 2 - box.height / 2;
+		const angle = (box.rotation * Math.PI) / 180;
+		const cx = box.x + box.width / 2 + localX * Math.cos(angle) - localY * Math.sin(angle);
+		const cy = box.y + box.height / 2 + localX * Math.sin(angle) + localY * Math.cos(angle);
+		return { x: cx - width / 2, y: cy - height / 2, width, height };
 	}
 
 	/** Remplace UN élément par sa version modifiée, annulable comme n'importe quelle autre transformation (voir HistoryAction "transform") — utilisé par finishTextEditing pour l'édition d'une boîte existante. */
@@ -8102,7 +8481,9 @@ export class DrawView extends TextFileView {
 
 	/** Clonage profond (pas une simple copie de référence) : les transformations ne doivent jamais muter l'objet d'origine, ni le clone du "before" d'une action d'historique — voir le commentaire sur l'immutabilité des traits dans render.ts:strokeBounds. */
 	private cloneElement(el: DrawElement): DrawElement {
-		return el.type === "stroke" ? { ...el, points: el.points.map((p) => [...p] as Pt) } : { ...el };
+		if (el.type === "stroke") return { ...el, points: el.points.map((p) => [...p] as Pt) };
+		if (el.type === "text" && el.colorRuns) return { ...el, colorRuns: el.colorRuns.map((r) => ({ ...r })) };
+		return { ...el };
 	}
 
 	private setSelection(pageIndex: number, ids: Iterable<string>): void {
@@ -8277,14 +8658,11 @@ export class DrawView extends TextFileView {
 		};
 		this.addManyElements(pageIndex, [element]);
 
-		// Même geste qu'après une forme fraîchement tracée (voir finishShape) :
-		// bascule sur le lasso, déjà sélectionnée par addManyElements, pour
-		// pouvoir la replacer tout de suite ; revient seul au stylo au prochain
-		// clic dans le vide (returnToPenAfterDeselect, armé APRÈS setTool
-		// puisque setTool le remet lui-même à faux).
-		this.setTool("select");
-		this.returnToPenAfterDeselect = true;
-		this.autoSelectShapeId = element.id;
+		// Même geste qu'après une forme de la palette (voir
+		// selectNewlyCreatedShape) : curseur, la copie déjà sélectionnée pour
+		// la replacer tout de suite, et il y reste.
+		this.setTool("cursor");
+		this.setSelection(pageIndex, [element.id]);
 	}
 
 	// --- Transformation (déplacement, redimensionnement, rotation) --------------
@@ -8909,7 +9287,13 @@ export class DrawView extends TextFileView {
 	}
 
 	private recolorSelection(color: string): void {
-		this.transformSelectedColorable((s) => ({ ...s, color }));
+		// Une zone de texte multicolore (voir TextElement.colorRuns) redevient
+		// entièrement de cette couleur, comme un trait ou une forme.
+		this.transformSelectedColorable((s) => {
+			if (s.type !== "text") return { ...s, color };
+			const { colorRuns: _dropped, ...rest } = s;
+			return { ...rest, color };
+		});
 	}
 
 	/** Jamais pour une zone de texte (voir TextElement.fontSizePx, model.ts — `size` ne pilote plus sa police) : le menu qui appelle cette méthode (voir openSelectionContextMenu, hasThickness) ne s'affiche de toute façon plus quand la sélection ne contient QUE du texte, mais une sélection MIXTE (traits/formes + texte) ne doit toucher que les deux premiers. */

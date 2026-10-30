@@ -159,6 +159,10 @@ export default class QuillStonePlugin extends Plugin {
 		this.addToolCommand("tool-hand", "Hand tool", "hand");
 		this.addToolCommand("tool-cursor", "Cursor tool", "cursor");
 		this.addToolCommand("tool-lasso", "Lasso tool", "select");
+		// Même principe que les outils ci-dessus : la touche B est gérée par le
+		// Scope de la vue (voir DrawView.onOpen), cette commande ne sert qu'à
+		// la palette de commandes et à un raccourci choisi par l'utilisateur.
+		this.addDrawViewCommand("toggle-toolbar", "Show/hide the toolbar", (view) => view.toggleToolbar());
 
 		this.addDrawViewCommand(
 			"bring-selection-to-front",

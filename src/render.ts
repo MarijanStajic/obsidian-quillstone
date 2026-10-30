@@ -1,4 +1,4 @@
-import { BackgroundKind, DrawElement, Density, DrawingPage, ImageElement, Pt, ShapeElement, Stroke, StrokeElement, TextAlign, TextElement, TextFont, newStrokeId } from "./model";
+import { BackgroundKind, DrawElement, Density, DrawingPage, ImageElement, Pt, ShapeElement, Stroke, StrokeElement, TextAlign, TextColorRun, TextElement, TextFont, newStrokeId } from "./model";
 
 /**
  * Rendu d'une feuille sur un contexte 2D.
@@ -503,7 +503,7 @@ export interface RenderSceneOptions {
 }
 
 function renderRank(el: DrawElement): number {
-	return el.type === "stroke" && el.tool === "highlighter" ? 0 : 1;
+	return (el.type === "stroke" && el.tool === "highlighter") || (el.type === "shape" && el.highlighter) ? 0 : 1;
 }
 
 function boundsIntersectRect(a: StrokeBounds, b: StrokeBounds): boolean {
@@ -683,7 +683,39 @@ function strokeArrow(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2: 
  * même), ce qui reste un couple de coordonnées valide pour moveTo/lineTo,
  * jamais besoin de les normaliser ici.
  */
-function drawShapeElement(ctx: CanvasRenderingContext2D, el: ShapeElement): void {
+/**
+ * Une forme issue du surligneur (ShapeElement.highlighter) passe par le même
+ * tampon et la même composition translucide que drawHighlighterStroke — sinon
+ * elle sortait en contour plein, opaque, qui paraissait aussi bien plus épais
+ * que le trait de surligneur d'origine (voir le bug signalé).
+ */
+function drawShapeElement(
+	ctx: CanvasRenderingContext2D,
+	el: ShapeElement,
+	pageWidth: number,
+	pageHeight: number,
+	paperColor: string
+): void {
+	if (!el.highlighter) {
+		traceShapeElement(ctx, el);
+		return;
+	}
+	const buffer = ensureHighlighterBuffer(pageWidth, pageHeight);
+	const bctx = buffer.getContext("2d");
+	if (!bctx) return;
+	bctx.setTransform(1, 0, 0, 1, 0, 0);
+	bctx.clearRect(0, 0, pageWidth, pageHeight);
+	traceShapeElement(bctx, el);
+
+	const lightPaper = isLightPaper(paperColor);
+	ctx.save();
+	ctx.globalCompositeOperation = lightPaper ? "multiply" : "screen";
+	ctx.globalAlpha = lightPaper ? HIGHLIGHTER_ALPHA_MULTIPLY : HIGHLIGHTER_ALPHA_SCREEN;
+	ctx.drawImage(buffer, 0, 0);
+	ctx.restore();
+}
+
+function traceShapeElement(ctx: CanvasRenderingContext2D, el: ShapeElement): void {
 	ctx.save();
 	ctx.translate(el.x + el.width / 2, el.y + el.height / 2);
 	ctx.rotate((el.rotation * Math.PI) / 180);
@@ -822,6 +854,8 @@ function textMeasureCtx(): CanvasRenderingContext2D | null {
 export interface WrappedLine {
 	text: string;
 	lastOfParagraph: boolean;
+	/** Offset (UTF-16) du premier caractère de `text` dans le texte d'origine — sert à retrouver ses couleurs (voir TextElement.colorRuns, textColorSegments). */
+	start: number;
 }
 
 /**
@@ -843,32 +877,51 @@ export interface WrappedLine {
  */
 export function wrapTextLines(text: string, maxWidth: number, fontSizePx: number, font: TextFont = "sans"): WrappedLine[] {
 	const ctx = textMeasureCtx();
-	if (!ctx) return text.split("\n").map((line) => ({ text: line, lastOfParagraph: true }));
+	if (!ctx) {
+		let offset = 0;
+		return text.split("\n").map((line) => {
+			const wrapped = { text: line, lastOfParagraph: true, start: offset };
+			offset += line.length + 1;
+			return wrapped;
+		});
+	}
 	ctx.font = textFont(fontSizePx, font);
 
 	const lines: WrappedLine[] = [];
+	// Offsets suivis en parallèle du découpage (voir WrappedLine.start) : une
+	// ligne est toujours une sous-chaîne CONTIGUË du texte d'origine (les mots
+	// y restent séparés par l'espace unique qui les séparait déjà), seuls les
+	// espaces où la ligne est coupée disparaissent.
+	let paragraphStart = 0;
 	for (const paragraph of text.split("\n")) {
 		if (paragraph === "") {
-			lines.push({ text: "", lastOfParagraph: true });
+			lines.push({ text: "", lastOfParagraph: true, start: paragraphStart });
+			paragraphStart += 1;
 			continue;
 		}
 		let current = "";
+		let currentStart = paragraphStart;
+		let wordStart = paragraphStart;
 		for (const word of paragraph.split(" ")) {
 			const candidate = current ? `${current} ${word}` : word;
 			if (ctx.measureText(candidate).width <= maxWidth) {
+				if (!current) currentStart = wordStart;
 				current = candidate;
+				wordStart += word.length + 1;
 				continue;
 			}
 
 			// `candidate` déborde : la ligne en cours (s'il y en avait une) est
 			// complète telle quelle.
 			if (current) {
-				lines.push({ text: current, lastOfParagraph: false });
+				lines.push({ text: current, lastOfParagraph: false, start: currentStart });
 				current = "";
 			}
 
 			if (ctx.measureText(word).width <= maxWidth) {
 				current = word;
+				currentStart = wordStart;
+				wordStart += word.length + 1;
 				continue;
 			}
 
@@ -876,20 +929,83 @@ export function wrapTextLines(text: string, maxWidth: number, fontSizePx: number
 			// aucun espace à exploiter, on le décompose caractère par
 			// caractère (voir la doc de la fonction).
 			let chunk = "";
+			let chunkStart = wordStart;
 			for (const ch of word) {
 				const withCh = chunk + ch;
 				if (chunk && ctx.measureText(withCh).width > maxWidth) {
-					lines.push({ text: chunk, lastOfParagraph: false });
+					lines.push({ text: chunk, lastOfParagraph: false, start: chunkStart });
+					chunkStart += chunk.length;
 					chunk = ch;
 				} else {
 					chunk = withCh;
 				}
 			}
 			current = chunk;
+			currentStart = chunkStart;
+			wordStart += word.length + 1;
 		}
-		lines.push({ text: current, lastOfParagraph: true });
+		lines.push({ text: current, lastOfParagraph: true, start: currentStart });
+		paragraphStart += paragraph.length + 1;
 	}
 	return lines;
+}
+
+/**
+ * Découpe [start, end) en segments de couleur uniforme d'après `runs` (voir
+ * TextElement.colorRuns) — tout ce qu'aucune plage ne couvre prend
+ * `baseColor`. Partagée par le rendu canevas (drawTextElement) et le calque
+ * coloré de l'éditeur (view.ts), qui doivent toujours s'accorder.
+ */
+export function textColorSegments(
+	start: number,
+	end: number,
+	runs: TextColorRun[] | undefined,
+	baseColor: string
+): { start: number; end: number; color: string }[] {
+	if (!runs || runs.length === 0) return start < end ? [{ start, end, color: baseColor }] : [];
+	const segments: { start: number; end: number; color: string }[] = [];
+	const push = (from: number, to: number, color: string) => {
+		if (from >= to) return;
+		const last = segments[segments.length - 1];
+		if (last && last.end === from && last.color === color) last.end = to;
+		else segments.push({ start: from, end: to, color });
+	};
+	let pos = start;
+	for (const run of [...runs].sort((a, b) => a.start - b.start)) {
+		if (run.end <= pos) continue;
+		if (run.start >= end) break;
+		push(pos, Math.max(pos, run.start), baseColor);
+		const from = Math.max(pos, run.start);
+		const to = Math.min(end, run.end);
+		push(from, to, run.color);
+		pos = Math.max(pos, to);
+	}
+	push(pos, end, baseColor);
+	return segments;
+}
+
+/**
+ * Compresse une couleur par caractère en plages (voir TextElement.colorRuns)
+ * — `undefined` quand tout le texte a la même couleur, qui devient alors
+ * simplement `color` (voir view.ts:finishTextEditing).
+ */
+export function compressTextColors(charColors: string[]): TextColorRun[] | undefined {
+	const runs: TextColorRun[] = [];
+	for (let i = 0; i < charColors.length; i++) {
+		const last = runs[runs.length - 1];
+		if (last && last.color === charColors[i]) last.end = i + 1;
+		else runs.push({ start: i, end: i + 1, color: charColors[i] });
+	}
+	return runs.length > 1 ? runs : undefined;
+}
+
+/** Inverse de compressTextColors : une couleur par caractère (UTF-16) de `el.text`. */
+export function expandTextColors(el: { text: string; color: string; colorRuns?: TextColorRun[] }): string[] {
+	const colors: string[] = new Array<string>(el.text.length).fill(el.color);
+	for (const run of el.colorRuns ?? []) {
+		for (let i = Math.max(0, run.start); i < Math.min(el.text.length, run.end); i++) colors[i] = run.color;
+	}
+	return colors;
 }
 
 /**
@@ -950,21 +1066,46 @@ function alignedLineX(lineWidth: number, boxWidth: number, align: TextAlign): nu
  * seul mot (rien à répartir entre deux mots) retombe simplement sur un rendu
  * aligné à gauche.
  */
-function drawJustifiedLine(ctx: CanvasRenderingContext2D, line: string, y: number, boxWidth: number): void {
-	const words = line.split(" ").filter((w) => w.length > 0);
+function drawJustifiedLine(ctx: CanvasRenderingContext2D, el: TextElement, line: WrappedLine, y: number, boxWidth: number): void {
+	const words: { text: string; start: number }[] = [];
+	let offset = line.start;
+	for (const w of line.text.split(" ")) {
+		if (w.length > 0) words.push({ text: w, start: offset });
+		offset += w.length + 1;
+	}
 	if (words.length <= 1) {
-		ctx.fillText(line, TEXT_PADDING_PX, y);
+		fillColoredText(ctx, el, line.text, line.start, TEXT_PADDING_PX, y);
 		return;
 	}
-	const wordWidths = words.map((w) => ctx.measureText(w).width);
+	const wordWidths = words.map((w) => ctx.measureText(w.text).width);
 	const totalWordWidth = wordWidths.reduce((sum, w) => sum + w, 0);
 	const availableWidth = Math.max(0, boxWidth - TEXT_PADDING_PX * 2);
 	const gap = Math.max(0, (availableWidth - totalWordWidth) / (words.length - 1));
 	let x = TEXT_PADDING_PX;
 	words.forEach((word, i) => {
-		ctx.fillText(word, x, y);
+		fillColoredText(ctx, el, word.text, word.start, x, y);
 		x += wordWidths[i] + gap;
 	});
+}
+
+/**
+ * ctx.fillText de `text` (qui commence à l'offset `start` de el.text), une
+ * fois par segment de couleur (voir textColorSegments) — chaque segment
+ * avance de sa propre largeur mesurée. Un seul fillText pour une zone d'une
+ * seule couleur, exactement comme avant l'ajout de TextElement.colorRuns.
+ */
+function fillColoredText(ctx: CanvasRenderingContext2D, el: TextElement, text: string, start: number, x: number, y: number): void {
+	if (!el.colorRuns || el.colorRuns.length === 0) {
+		ctx.fillStyle = el.color;
+		ctx.fillText(text, x, y);
+		return;
+	}
+	for (const seg of textColorSegments(start, start + text.length, el.colorRuns, el.color)) {
+		const part = text.slice(seg.start - start, seg.end - start);
+		ctx.fillStyle = seg.color;
+		ctx.fillText(part, x, y);
+		x += ctx.measureText(part).width;
+	}
 }
 
 /**
@@ -997,10 +1138,10 @@ function drawTextElement(ctx: CanvasRenderingContext2D, el: TextElement): void {
 	let y = TEXT_PADDING_PX;
 	for (const line of lines) {
 		if (align === "justify" && !line.lastOfParagraph) {
-			drawJustifiedLine(ctx, line.text, y, el.width);
+			drawJustifiedLine(ctx, el, line, y, el.width);
 		} else {
 			const lineWidth = ctx.measureText(line.text).width;
-			ctx.fillText(line.text, alignedLineX(lineWidth, el.width, align), y);
+			fillColoredText(ctx, el, line.text, line.start, alignedLineX(lineWidth, el.width, align), y);
 		}
 		y += lineHeight;
 	}
@@ -1095,7 +1236,7 @@ export function drawElement(
 		const resolution = resolveImage?.(el) ?? { status: "loading" };
 		drawImageElement(ctx, el, resolution);
 	} else if (el.type === "shape") {
-		drawShapeElement(ctx, el);
+		drawShapeElement(ctx, el, pageWidth, pageHeight, paperColor);
 	} else if (el.type === "text") {
 		drawTextElement(ctx, el);
 	} else if (el.tool === "highlighter") {
